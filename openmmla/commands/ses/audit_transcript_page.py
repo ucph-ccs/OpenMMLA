@@ -652,7 +652,7 @@ kbd{background:#333;border-radius:3px;padding:0 5px}
 <button type="button" id="b_mic" style="display:none">Microphone <kbd>c</kbd></button>
 <button type="button" id="b_stop">Stop <kbd>s</kbd></button></div>
 <div id="player"></div>
-<details id="help"><summary>How to transcribe, and the keys</summary><div id="helpbody"></div></details></section>
+<details id="help"><summary id="helptoggle">How to transcribe, and the keys</summary><div id="helpbody"></div></details></section>
 <section id="right"><div id="title"></div>
 <div id="blind" style="display:none">
 <div class="q" id="q_status"></div><div class="choices" id="f_status"></div>
@@ -691,6 +691,9 @@ const NOBODY = [['who', 'none'], ['adult', 'no'], ['peer', 'none'], ['other_offt
 const LEAVE = 'This item has changes that are not saved. Leave it without saving them?';
 function said(text, mood) { $('status').textContent = text; $('status').className = mood || ''; }
 function show(id, on) { $(id).style.display = on ? '' : 'none'; }
+// Enter and space on a button, a link or the help's summary that has the focus are its own: the browser presses,
+// follows or folds it, and no key of the page acts on them (any other key still does; a click hands the focus back)
+function controlKey(e) { return (e.key === 'Enter' || e.key === ' ') && ['BUTTON', 'A', 'SELECT', 'SUMMARY'].includes((e.target || {}).tagName); }
 // where the server serves this page's routes: the path prefix of an audit served beside another, set by the server
 const BASE = '';
 // the auditor is the one the personal link named: the page sends no name, and keeps none
@@ -983,6 +986,9 @@ async function onKey(e) {
   const k = e.key, typing = e.target === $('transcript') || e.target === $('note');
   // what the text fields pass on, taken before a key with a modifier is let through
   if (k === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); return save(); }
+  // a button reached with Tab: space presses it rather than playing the window (Ctrl/⌘ Enter, above, still saves, as
+  // the Save button says)
+  if (controlKey(e)) return;
   if (typing) {
     if (k === 'Escape') { e.preventDefault(); return playWindow(); }
     if (k === 'ArrowLeft' && e.altKey) { e.preventDefault(); return back(); }
@@ -1016,6 +1022,8 @@ for (const [id, act] of [['b_window', playWindow], ['b_before', fromBefore], ['b
                          ['next_item', () => go(pos + 1)], ['first_open', () => go(firstOpen())]]) $(id).addEventListener('click', () => { if ($(id).blur) $(id).blur(); act(); });
 $('overlap').addEventListener('change', () => { if ($('overlap').blur) $('overlap').blur(); });
 $('flag').addEventListener('change', () => { if ($('flag').blur) $('flag').blur(); });
+// the help's summary, clicked, folds the help and hands the keys back to the page, where space would fold it again
+$('helptoggle').addEventListener('click', () => { if ($('helptoggle').blur) $('helptoggle').blur(); });
 $('timeline').addEventListener('click', seekTo);
 window.addEventListener('beforeunload', e => { if (dirty()) { e.preventDefault(); e.returnValue = ''; } });
 document.addEventListener('keydown', e => { onKey(e); });

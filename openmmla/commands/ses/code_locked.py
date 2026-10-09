@@ -1696,8 +1696,9 @@ function rateChanged() {
   if (playing && playing.main) { const s = seenOf(playing.k); s.rate = Math.max(s.rate, v.playbackRate); }
 }
 if ($('video').addEventListener) { $('video').addEventListener('ended', clipEnded); $('video').addEventListener('ratechange', rateChanged); }
+// space on a button or the session list that has the focus is that control's own (controlKey): no replay to count
 document.addEventListener('keydown', e => {
-  if (e.target === $('note') || !codebook || !locked || e.metaKey || e.ctrlKey || e.altKey || e.repeat) return;
+  if (e.target === $('note') || controlKey(e) || !codebook || !locked || e.metaKey || e.ctrlKey || e.altKey || e.repeat) return;
   if (e.key === ' ' && playing && playing.main) seenOf(playing.k).replays++;
   if (e.key === 'p') { e.preventDefault(); playContext(); }
 });

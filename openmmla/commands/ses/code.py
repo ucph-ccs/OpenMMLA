@@ -436,7 +436,7 @@ def krippendorff_alpha(units: list[list[str]]) -> float | None:
 
 
 PAGE = r"""<!doctype html>
-<html><head><meta charset="utf-8"><title>Session coding</title>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Session coding</title>
 <style>
  body{margin:0;font:15px/1.4 -apple-system,Helvetica,Arial,sans-serif;background:#111;color:#eee}
  /* the header of the audit pages: the title, "Coding as NAME" and change name, then the session and the toggles */
@@ -445,7 +445,11 @@ PAGE = r"""<!doctype html>
  select,input,button{font:inherit;background:#222;color:#eee;border:1px solid #444;border-radius:6px;padding:6px 10px}
  #rename{background:none;border-color:#333;color:#999;border-radius:4px;padding:1px 8px} #newname{padding:1px 8px}
  button{cursor:pointer} button.active{background:#2d6cdf;border-color:#2d6cdf}
+ /* the session list, as wide as its longest session, no wider than the screen at any width */
+ #session{max-width:calc(100vw - 110px)}
  main{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:16px;padding:16px}
+ /* a narrow screen (a phone): the class buttons below the video */
+ @media (max-width:700px){main{grid-template-columns:minmax(0,1fr)}}
  video{width:100%;background:#000;border-radius:8px}
  .keys button{display:block;width:100%;text-align:left;margin:6px 0;padding:10px}
  .keys b{display:inline-block;width:26px;height:26px;line-height:26px;text-align:center;background:#333;border-radius:5px;margin-right:8px}
@@ -478,7 +482,7 @@ PAGE = r"""<!doctype html>
  <b>Session coding</b>
  <span id="named"><span id="codingas"></span><span id="visit" class="meta" style="display:none">, for this visit</span></span>
  <label id="naming" style="display:none">Coding as <input id="newname" size="14" autocomplete="off" spellcheck="false" placeholder="your name"></label><button id="rename" type="button" style="display:none">change name</button><input id="coder" type="hidden">
- <label>Session <select id="session"></select></label>
+ <label id="sessionlabel">Session <select id="session"></select></label>
  <button id="texttoggle" onclick="toggleText()">Transcript</button>
  <button id="advancetoggle" onclick="toggleAdvance()">Auto-advance</button>
  <span id="progress" class="meta"></span><span id="status"></span>
@@ -538,6 +542,15 @@ function said(text, tone) {
 // the answer to a save that was out while other keys were pressed: a refusal said since the save began stays, the answer after it
 function answered(text, since, tone) { return refusal && refusal.n > since ? said(`${refusal.text} · ${text}`, true) : said(text, tone); }
 function clock() { return new Date().toTimeString().slice(0, 8); }
+// whether the session list has the focus from a click (on it, or on its label "Session"), which leaving it forgets
+let listPointed = false;
+// Enter and space on a button, a link or a list that has the focus are its own: the browser presses, follows or opens
+// it, and no key of the page acts on them (any other key still does; a click hands the focus back to the page, and
+// the session list keeps the focus a click gave it, so its keys are the page's then)
+function controlKey(e) {
+  const t = e.target || {};
+  return (e.key === 'Enter' || e.key === ' ') && ['BUTTON', 'A', 'SELECT', 'SUMMARY'].includes(t.tagName) && !(t === $('session') && listPointed);
+}
 function key(w) { return w.start.toFixed(3); }
 function recall(name) { try { return localStorage.getItem(name); } catch (e) { return null; } }
 function remember(name, value) { try { localStorage.setItem(name, value); } catch (e) {} }
@@ -883,6 +896,9 @@ async function loadSession(id) {
   if (missed) said('the linked window is not listed in this session');
 }
 document.addEventListener('keydown', e => {
+  // Tab moves the focus by the keyboard: the session list it reaches has Enter and space of its own, even after a press
+  // on "Session" that gave the list no focus
+  if (e.key === 'Tab') listPointed = false;
   if (e.target === $('note')) { if (e.key === 'Enter') { e.preventDefault(); $('note').blur(); saveNote(); } return; }
   // the name field: Enter takes the name, Esc keeps the one before; the page's keys are off while it has the focus,
   // and while a name check is out
@@ -891,6 +907,8 @@ document.addEventListener('keydown', e => {
     if (e.key === 'Escape') { e.preventDefault(); if (closeName(true)) $('newname').blur(); }
     return;
   }
+  // change name, the toggles, a class button or the session list reached with Tab: Enter and space press or open it
+  if (controlKey(e)) return;
   if (!codebook || checking || e.metaKey || e.ctrlKey || e.altKey) return;
   // shift + a digit is the also-state, read from the physical key (row or numpad), since what shift+1 types depends on the layout
   const digit = e.shiftKey && /^(?:Digit|Numpad)([0-9])$/.exec(e.code || '');
@@ -939,6 +957,8 @@ document.addEventListener('keydown', e => {
     $('hidden').style.display = '';
   }
   $('session').onchange = e => { e.target.blur(); loadSession(e.target.value); };
+  // a press on the list bubbles to its label, as one on the word "Session" does
+  $('sessionlabel').onpointerdown = () => { listPointed = true; }; $('session').onblur = () => { listPointed = false; };
   $('strip').onclick = e => { const i = e.target.dataset.i; if (i !== undefined && +i !== index) { index = +i; render(); } };
   // /?session=<id>&start=<window start> (the Agreement page's links) opens that window instead of the remembered session
   const linked = query.get('session'), start = Number(query.get('start')), last = recall('session');

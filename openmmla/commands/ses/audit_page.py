@@ -1078,6 +1078,9 @@ const $ = id => document.getElementById(id);
 let boot = null, auditor = null, seq = [], pos = 0, item = null, phase = null, st = null, saving = false, loading = false, shownAt = 0;
 function said(text, mood) { $('status').textContent = text; $('status').className = mood || ''; }
 function show(id, on) { $(id).style.display = on ? '' : 'none'; }
+// Enter and space on a button, a link or a list that has the focus are its own: the browser presses, follows or opens
+// it, and no key of the page acts on them (any other key still does; a click hands the focus back to the page)
+function controlKey(e) { return (e.key === 'Enter' || e.key === ' ') && ['BUTTON', 'A', 'SELECT', 'SUMMARY'].includes((e.target || {}).tagName); }
 // the auditor is the one the personal link named: the page sends no name, and keeps none
 async function api(path) {
   const r = await fetch(path); const data = await r.json().catch(() => ({}));
@@ -1219,6 +1222,9 @@ async function save(body, then) {
 async function onKey(e) {
   if (!boot || !item && e.key !== 'ArrowLeft') return;
   if (e.target === $('note')) { if (e.key === 'Escape') $('note').blur(); return; }
+  // a control reached with Tab (the open page's change name): Enter presses it, never saving (and locking) a frame's
+  // identity answers
+  if (controlKey(e)) return;
   if (e.metaKey || e.ctrlKey || e.altKey || loading) return;
   const k = e.key;
   if (k === 'ArrowLeft') { e.preventDefault(); return open(pos - 1); }
@@ -1417,7 +1423,9 @@ OPEN_NAMED = ("function named(path, as) { const [n, s] = as || [auditor, scope];
 OPEN_TAIL = (
     "document.addEventListener('keydown', e => { if (!renaming && e.target !== $('newname')) onKey(e); });\n"
     "$('named').addEventListener('submit', e => { e.preventDefault(); submitted(); });\n"
-    "$('rename').addEventListener('click', editName);\n"
+    "// change name, pressed, hands the keys back to the page when the field does not open (a save or a load under way),\n"
+    "// where Enter or space would press it again\n"
+    "$('rename').addEventListener('click', () => { if ($('rename').blur) $('rename').blur(); editName(); });\n"
     "$('newname').addEventListener('keydown', e => {\n"
     "  if (e.isComposing) return;\n"
     "  if (e.key === 'Enter') { e.preventDefault(); rename(); } else if (e.key === 'Escape') { e.preventDefault(); keepName(); }\n"

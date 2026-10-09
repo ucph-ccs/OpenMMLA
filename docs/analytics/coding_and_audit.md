@@ -19,6 +19,8 @@ Without any of the flags below, `mmla ses-code` serves the default coding page a
 
 The coding page's header names the coder, "Coding as NAME", with **change name** beside it. **change name** turns the name into a field in its place, and the page's keys are off while the field has the focus. Enter takes the name when the server accepts it, with the checks it applies to every save (at most 100 bytes in its file-name form, not the name of a model's labels), and the browser remembers it; a refused name stays in the field with the reason. Esc or leaving the field keeps the name as it was. While the server checks a name sent with Enter, the field waits for the answer even when it loses the focus, and the page codes nothing: the keys do nothing, and a class button says that the name is still being checked. Only Esc drops the check. On the first visit the field is open for a name, and leaving it takes a name typed there as Enter does.
 
+Enter and space on a button or the session list that has the focus (**change name**, **Transcript**, **Auto-advance**, a class button, a definition's arrow) press or open it, as anywhere in a browser, and are none of the page's keys; any other key still is. A click hands the keys back to the page: the session list keeps the focus a click gives it, and space there still replays. On a phone the page is laid out at the phone's width, with the class buttons below the video.
+
 Two links set the name. `?coder=NAME`, as the agreement page's **adjudicate** links write it, codes under NAME for that visit only: the header adds ", for this visit", the remembered name stays, and a name taken through **change name** ends the visit. `?name=NAME`, as the audit entry writes it, is taken as if typed into the field and remembered, then removed from the address.
 
 `--entry-port PORT` puts **← All tasks** at the left of the header: a link back to the entry of two audits served together ([Serving both audits at one address](#serving-both-audits-at-one-address)). It opens the address alone of PORT on the host the page was opened at, with the same protocol, so give it the audits' port (8766 unless they run with `-p`). The link looks like **change name**. A key pressed while it has the focus reaches none of the page's keys, and Enter follows it. Leaving through it is leaving the page: a note not yet saved is lost, as when the tab is closed.
@@ -323,7 +325,7 @@ A frame or a clip that fails is its item's error, and a recording that fails is 
 | Gaze | `1` to `8` where (above) · `9` between two, then the two · `x` cannot tell · `⌫` back · `Enter` saves |
 | Who speaks | `0` no one · `1` a group member · `2` the teacher or another adult · `3` another group · `x` cannot tell · `space` replays. The clip must play to its end first. |
 
-Everywhere but the roster, `n` focuses the note. `←` and `→` move between items, and the page starts at the first unanswered item. Notes are kept with the answers and never read into the scores. The who-speaks gate (the clip played first) rests on what the browser reports: a convenience, not a control.
+Everywhere but the roster, `n` focuses the note. `←` and `→` move between items, and the page starts at the first unanswered item. Enter and space on a button or link that has the focus, such as **change name** reached with Tab, press or follow it and never save: Enter there does not lock a frame's identity answers. Notes are kept with the answers and never read into the scores. The who-speaks gate (the clip played first) rests on what the browser reports: a convenience, not a control.
 
 ### The open audit
 
@@ -600,7 +602,7 @@ All draws are seeded (`--audit-seed`) and use window times only. A session's pop
 
 ### The transcription page
 
-The page has the player on the left and the form on the right. Under the video, a bar shows the context in grey, the shaded window and the tail, with the playhead; a click on the bar plays from that point to the end. The keys work outside the text fields.
+The page has the player on the left and the form on the right. Under the video, a bar shows the context in grey, the shaded window and the tail, with the playhead; a click on the bar plays from that point to the end. The keys work outside the text fields. Enter and space on a button, link or the help's title that has the focus press, follow or fold it instead of playing. `Ctrl/⌘ Enter` saves from a focused button too, as it does from the text fields of the form.
 
 | Button | Key | What it does |
 |---|---|---|
