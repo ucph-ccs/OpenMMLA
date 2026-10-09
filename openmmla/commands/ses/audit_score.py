@@ -634,36 +634,43 @@ def confusions(units: dict) -> dict[str, dict]:
                                         'matrix': attributed}}
 
 
+def interauditor_pairs(mine: dict, theirs: dict) -> dict[str, list]:
+    """question -> the pairs (one auditor's answer, the other's) of two auditors' answers (item -> phase -> the
+    record that counts), on the items both answered: practice and flagged ones left out. The scores' agreement
+    (interauditor) and the audit server's agreement page (audit_agreement) count them alike."""
+    pairs: dict[str, list] = defaultdict(list)
+    for item, phases in mine.items():
+        if item not in theirs:
+            continue
+        for phase, record in phases.items():
+            twin = theirs[item].get(phase)
+            if twin is None or record.get('practice'):
+                continue
+            a, b = record['answer'], twin['answer']
+            if a.get('flag') or b.get('flag'):
+                continue
+            if phase == 'roster':
+                pairs['roster: wears the badge'].append((a['wears'], b['wears']))
+            elif phase == 'speech':
+                pairs['who speaks'].append((a['speaker'], b['speaker']))
+            elif phase == 'identity':
+                for n in sorted(set(a.get('boxes') or {}) & set(b.get('boxes') or {}), key=int):
+                    pairs['identity: who is in a box'].append((a['boxes'][n], b['boxes'][n]))
+                if a.get('missed') is not None and b.get('missed') is not None:
+                    pairs['identity: members without a box'].append((a['missed'], b['missed']))
+            else:
+                for n in sorted(set(a.get('boxes') or {}) & set(b.get('boxes') or {}), key=int):
+                    pairs['gaze: where'].append((a['boxes'][n]['class'], b['boxes'][n]['class']))
+    return pairs
+
+
 def interauditor(plan: dict, answers: dict, primary: str, partners=None) -> list[dict]:
     """per other auditor (of `partners`, default every one) and question, on the items both answered
     (practice and flagged ones left out): the pairs, the share agreeing and Cohen's kappa where it is defined"""
     rows = []
     mine = answers.get(primary, {})
     for other in sorted(set(answers if partners is None else partners) - {primary}):
-        theirs = answers[other]
-        pairs: dict[str, list] = defaultdict(list)
-        for item, phases in mine.items():
-            if item not in theirs:
-                continue
-            for phase, record in phases.items():
-                twin = theirs[item].get(phase)
-                if twin is None or record.get('practice'):
-                    continue
-                a, b = record['answer'], twin['answer']
-                if a.get('flag') or b.get('flag'):
-                    continue
-                if phase == 'roster':
-                    pairs['roster: wears the badge'].append((a['wears'], b['wears']))
-                elif phase == 'speech':
-                    pairs['who speaks'].append((a['speaker'], b['speaker']))
-                elif phase == 'identity':
-                    for n in sorted(set(a.get('boxes') or {}) & set(b.get('boxes') or {}), key=int):
-                        pairs['identity: who is in a box'].append((a['boxes'][n], b['boxes'][n]))
-                    if a.get('missed') is not None and b.get('missed') is not None:
-                        pairs['identity: members without a box'].append((a['missed'], b['missed']))
-                else:
-                    for n in sorted(set(a.get('boxes') or {}) & set(b.get('boxes') or {}), key=int):
-                        pairs['gaze: where'].append((a['boxes'][n]['class'], b['boxes'][n]['class']))
+        pairs = interauditor_pairs(mine, answers[other])
         for question, values in sorted(pairs.items()):
             categories = sorted({str(v) for pair in values for v in pair})
             at = {c: i for i, c in enumerate(categories)}

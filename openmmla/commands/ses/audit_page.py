@@ -1,16 +1,21 @@
-"""The page of a sensing audit (mmla ses-code --audit ID): one auditor at a time answers the roster,
+"""The page of a sensing audit (mmla ses-code --audit ID), at /sensing: one auditor at a time answers the roster,
 identity, gaze and who-speaks questions of audit.py, on a server of its own (port 8766 unless -p, as a
-campaign's).
+campaign's), and its agreement page (/sensing/agreement, audit_agreement) compares two auditors' answers.
 
 The server is code_locked's guarded server, and an auditor is always someone a one-time link of scope
 audit names (unless the audit is served open, below): the links are issued in the audit's own folder
 (--campaign <that folder> --issue-token NAME --token-scope audit, --token-subset reliability for a
 second auditor who answers the reliability subset only), whether the server binds 127.0.0.1 (behind
 an SSH forward) or the tailnet address with --allow-from. No answer is saved under a name the page
-gives, so no auditor reads or answers as another, and the scorer takes only the answers of claimed
-audit links. Every request is logged in the audit's hash-chained request log, and every answer is
-appended with its log line (append_record), so --verify-log checks the answers files both ways. A
-closed audit is not served, and its pictures and clips are refused (410) by a server still running.
+gives, so no auditor answers as another, and the scorer takes only the answers of claimed audit links.
+The audit's page shows a link only its own answers and progress; its agreement page (<path>/agreement and
+<path>/api/agreement) does not: it is served to every claimed link of the audit (to anyone, open), and it
+lists every name with answers, its scope and how many items it answered, and gives the confusion matrices
+of any two names, from which the answers of a few shared items can be read. Every request is logged in
+the audit's hash-chained request log (with links under the link's name, so the log shows whether an
+auditor's link opened the agreement page), and every answer is appended with its log line
+(append_record), so --verify-log checks the answers files both ways. A closed audit is not served, and its
+pictures and clips are refused (410) by a server still running.
 
 What the server reads: plan.json, each session's view.json and the answers files. It never opens a
 pipeline*.json, so no pipeline output can reach an answer; in blind mode the only pipeline-derived
@@ -42,8 +47,9 @@ it is a convenience for the auditor, not a control.
 The open audit (--audit ID --audit-open) is served as the default coding page is: no link, claim or
 cookie. The page (OPEN_AUDIT_PAGE) asks for the auditor's name (code.name_error checks it, as the default
 page checks a coder's; the browser remembers it) and whether they answer the full audit or the reliability
-subset, and every request but the page itself carries both (?auditor=NAME&scope=full|reliability; the
-server puts them into the picture and clip addresses it sends). Opened from the entry of two audits
+subset, and every request but the page itself, its redirects, the agreement page and its API carries both
+(?auditor=NAME&scope=full|reliability; the server puts them into the picture and clip addresses it sends);
+those few are answered without a name and logged without one. Opened from the entry of two audits
 (below), or reloaded in a tab that started, it starts with the name and scope kept, through the boot
 request a Start sends; its header's change name starts under another name, typed in place, with the scope
 in use. The server sees only the requests a Start sends. A name is taken in NFC, without control,
@@ -52,9 +58,10 @@ scope and no link; a default-page coder's name may be typed (the answers are a f
 name's file belongs to that name: a name whose file (in any case or Unicode form) holds another name's
 answers or an answer saved through a link is refused, and so is a scope other than the one its answers
 were saved under, all checked again under the log's lock when an answer is saved; a refusal never says the
-other name. Once an answer is saved open, the audit is not served with links again. The request log keeps
-the typed name on every request and save (its `coder`, which --verify-log checks against the `auditor` of
-each open line), so --verify-log still checks the answers files both ways; the start line records `open`.
+other name (the agreement page lists every name with answers, to anyone). Once an answer is saved open, the
+audit is not served with links again. The request log keeps the typed name on every request that carries one
+and on every save (its `coder`, which --verify-log checks against the `auditor` of each open line), so
+--verify-log still checks the answers files both ways; the start line records `open`.
 --allow-from is optional: a tailnet bind without it lets every tailnet address in (0.0.0.0 and LAN
 addresses stay refused). Every rule of what an auditor sees holds per typed name; that the person typing a
 name is that auditor is not checked, so one person may answer a frame's identity under a second name, see
@@ -65,16 +72,27 @@ A transcription audit (a plan whose task is 'transcript', drawn by audit_speech)
 command too, with links or open as above, but with the routes and the page of audit_transcript_page
 (TranscriptHandler, TRANSCRIPT_PAGE); --audit-sweeps says how many of its sweeps are served.
 
+Each audit is served under one path, its handler's `base_path`, by its kind: /sensing or /transcription, alone or
+beside another audit. Its page is that path exactly, and every route of it lies under it: the agreement page beside
+it (<path>/agreement and its API <path>/api/agreement: audit_agreement), the API (<path>/api/boot, item, progress and
+answer) and the pictures and clips (<path>/img/..., <path>/clip/...), whose addresses the server sends. The addresses
+of before are kept: / alone and /audit (under the former prefix of a part served beside another, below) redirect (303)
+to the page with the query they came with, and the former API, pictures and clips (/api/audit/..., /audit/img/...,
+/audit/clip/...) are answered as before, so a page loaded before a restart keeps working. Each start line records the
+path as `prefix`.
+
 Two audits served together (--audit ID --audit-with ID2, a sensing audit and a transcription audit) share one server
-and one port: TogetherHandler hands each request to the handler class of its part. The --audit part keeps its routes
-and its pages' bytes but for the link back to the entry (below). The --audit-with part, which must be a transcription
-audit (a sensing audit's page asks for /audit and /api/audit/ itself), is served under WITH_PREFIX (/t/audit,
-/t/api/audit/..., /t/audit/clip/...): its handler routes the path without the prefix, and its page and every address
-the server sends it carry the prefix (the handler's `base_path`). GET / is the entry (ENTRY_PAGE): a link to the
-default coding page, the address alone of port --audit-code-port (CODE_PORT unless given; 0 leaves it out) on the host
-the entry was opened at (a coding server of any version answers it with the page, at once or through its redirect to
-/code), then each part in the order of the flags. Served open, the entry asks the name (checked in the browser as
-typed_name checks it, and filled in with this tab's name, else the name kept for a part) and offers each part's full
+and one port: TogetherHandler hands each request to the handler class of its part, a path under a part's base path as
+it came. The --audit part keeps its pages' bytes but for the link back to the entry (below). The --audit-with part,
+which must be a transcription audit (a sensing audit's page keeps an open auditor's name under the keys of a page
+served alone, and it is served at /sensing only), had its addresses under WITH_PREFIX (/t/audit, /t/api/audit/...,
+/t/audit/clip/...): they are answered still, the prefix taken off before its handler routes them as former addresses,
+and its links' cookie and the keys its open page keeps the name under are named by the prefix as before (the
+handler's `former_path`). A second transcription audit is served at /transcription-2. GET / is the entry
+(ENTRY_PAGE): a link to the default coding page, the address alone of port --audit-code-port (CODE_PORT unless given;
+0 leaves it out) on the host the entry was opened at (a coding server of any version answers it with the page, at once
+or through its redirect to /code), then each part in the order of the flags. Served open, the entry asks the name
+(checked in the browser as typed_name checks it, and filled in with this tab's name, else the name kept for a part) and offers each part's full
 audit and reliability subset: a choice writes the name and the scope into the browser's storage under the keys that
 part's open page reads, hands them to that page in the tab's own sessionStorage (where the name is kept as this tab's,
 TAB_NAME_KEY), then opens it at #start (a fragment: no server sees it), and the page starts under the name and scope
@@ -90,7 +108,7 @@ link. Each part keeps its own campaign folder, request log, answers files, links
 and scopes, locks, blind closes and refusals, and a request to one part opens no file of the other (a link's
 /c/<token>, of neither part until then, reads each part's campaign.yml to find which holds it, and writes nothing of
 either: a change it meets is logged by that part's own next request). --audit-open serves both open, and --audit-sweeps the sweeps of the
-transcription audit. Each part's log gets the start line its server alone writes, with `prefix` (its own),
+transcription audit. Each part's log gets the start line its server alone writes, with `prefix` (its own base path),
 `together_with` (the other audit's id and prefix) and `code_port` (the coding page's port the entry links to, 0 for
 none), and a stop line, so --verify-log, the open serves the scorer finds and the scores read each audit as after a
 serve of its own.
@@ -111,6 +129,7 @@ from pathlib import Path
 from typing import Any
 
 from openmmla.commands.ses import audit as A
+from openmmla.commands.ses import audit_agreement as G
 from openmmla.commands.ses import code as C
 from openmmla.commands.ses import code_locked as L
 
@@ -120,12 +139,16 @@ L.register_loaded(__name__, __file__)
 DEFAULT_PORT = L.DEFAULT_PORT
 # the default coding page's port (mmla ses-code without these flags), which the page at / of two audits leads to
 CODE_PORT = 8765
+# the modules a sensing audit's server runs: the guard, the audit, its page and its agreement page with the scores'
+# reading of the answers and their pairs
 AUDIT_MODULES = ('openmmla.commands.ses.code', 'openmmla.commands.ses.code_locked', 'openmmla.commands.ses.audit',
-                 'openmmla.commands.ses.audit_page')
+                 'openmmla.commands.ses.audit_page', 'openmmla.commands.ses.audit_score',
+                 'openmmla.commands.ses.audit_agreement')
 # a transcription audit's server runs these as well: its page and routes, the grammar its transcripts are checked
-# with and the blind closes it reads (a sensing audit's start line names AUDIT_MODULES only, as before)
+# with, the blind closes it reads and the transcripts' alignment its agreement page counts with
 TRANSCRIPT_MODULES = AUDIT_MODULES + ('openmmla.commands.ses.audit_text', 'openmmla.commands.ses.audit_speech',
-                                      'openmmla.commands.ses.audit_transcript_page')
+                                      'openmmla.commands.ses.audit_transcript_page',
+                                      'openmmla.commands.ses.audit_score_transcript')
 # where a gaze lands, in the order the pipeline breaks ties (features.gaze_target, window_features._gaze_label):
 # any face before any hands, among hands the nearest, then the work area or a zone, then elsewhere, then out of frame
 GAZE_CLASSES = [
@@ -283,15 +306,27 @@ def sequence(audit: dict, subset: str | None) -> list[str]:
 class AuditHandler(L.GuardedHandler, BaseHTTPRequestHandler):
     """the audit's page and API, for the auditor a link binds (or, open, the name a request carries)"""
     KIND = 'audit'
-    HOME = '/audit'
     TITLE = 'Sensing audit'
-    ROUTES = {('GET', '/'): '_home', ('GET', '/audit'): '_page', ('GET', '/api/audit/boot'): '_boot',
+    # the routes under the audit's path (base_path): the page at the path itself and its agreement page beside it
+    # (each with a slash after it, a redirect there, as on the coding server), the agreement's API, the API, the
+    # pictures and the clips
+    SERVED = {('GET', ''): '_page', ('GET', '/'): '_to_page', ('GET', '/agreement'): '_agreement_page',
+              ('GET', '/agreement/'): '_to_agreement', ('GET', '/api/agreement'): '_agreement',
+              ('GET', '/api/boot'): '_boot', ('GET', '/api/item'): '_item',
+              ('GET', '/api/progress'): '_progress', ('POST', '/api/answer'): '_answer'}
+    SERVED_PREFIXES = (('GET', '/img/', '_image'), ('GET', '/clip/', '_clip'))
+    # the addresses of before the paths were unified (under former_path, which TogetherHandler takes off): / and the
+    # page's /audit redirect to the page; the API, the pictures and the clips are answered still, for a page loaded
+    # before a restart
+    ROUTES = {('GET', '/'): '_home', ('GET', '/audit'): '_to_page', ('GET', '/api/audit/boot'): '_boot',
               ('GET', '/api/audit/item'): '_item', ('GET', '/api/audit/progress'): '_progress',
               ('POST', '/api/audit/answer'): '_answer'}
     PREFIX_ROUTES = (('GET', '/audit/img/', '_image'), ('GET', '/audit/clip/', '_clip'))
     # what the page of two audits served together (ENTRY_PAGE) says of this one: its title and what is asked
     CHOICE = ('Identity, gaze and who speaks', 'Who is in each box of a picture, where they look, and who speaks in a '
                                                'short clip.')
+    # the kind of the audit's agreement page (audit_agreement)
+    AGREEMENT = 'sensing'
     audit: dict = {}
     folder: Path | None = None
     artifacts: Path | None = None
@@ -299,18 +334,51 @@ class AuditHandler(L.GuardedHandler, BaseHTTPRequestHandler):
     cache_lock = threading.Lock()
     # an open audit (--audit-open): no link, the auditor is the name each request carries
     open: bool = False
-    # served beside another audit (--audit-with): the base path of the --audit-with part, its prefix ('' for the --audit
-    # part, and alone), the --audit part's page at / that leads to both (None alone and for the --audit-with part), and
-    # whether the part is served so (its page's header then links back to that page: homed)
-    base_path: str = ''
+    # where the audit is served, by its kind, alone and beside another audit: its page at this path exactly, every
+    # route of it under it (a second transcription audit beside another is served at a path of its own)
+    base_path: str = '/sensing'
+    # served beside another audit (--audit-with): the prefix its addresses had before the paths were unified ('' for the
+    # --audit part, and alone; WITH_PREFIX for the --audit-with part), which also names its links' cookie and the keys
+    # its open page keeps the name under, as before; the --audit part's page at / that leads to both (None alone and for
+    # the --audit-with part); and whether the part is served so (its page's header then links back to that page: homed)
+    former_path: str = ''
     entry: str | None = None
     together: bool = False
 
     @property
+    def HOME(self) -> str:
+        # where a link claimed leads: the audit's page
+        return self.base_path
+
+    @property
     def cookie_name(self) -> str:
-        # the links of two audits served at one address keep their cookies apart: the prefixed part's is its own
+        # the links of two audits served at one address keep their cookies apart, named as before the paths were
+        # unified: the --audit-with part's is its own
         name = super().cookie_name
-        return f"{name}_{self.base_path.strip('/')}" if self.base_path else name
+        return f"{name}_{self.former_path.strip('/')}" if self.former_path else name
+
+    def _within(self, path: str) -> str | None:
+        """a path as the audit's routes see it, under its base path ('' for the page itself); None outside it"""
+        base = self.base_path
+        return path[len(base):] if path == base or path.startswith(base + '/') else None
+
+    def _route(self, method: str, path: str) -> tuple[str, str] | None:
+        # under the audit's path its routes; any other path is a former address (GuardedHandler routes ROUTES)
+        rest = self._within(path)
+        if rest is None:
+            return super()._route(method, path)
+        name = self.SERVED.get((method, rest))
+        if name:
+            return name, ''
+        for verb, prefix, name in self.SERVED_PREFIXES:
+            if verb == method and rest.startswith(prefix) and len(rest) > len(prefix):
+                return name, rest[len(prefix):]
+        return None
+
+    def send_message(self, path: str, text: str, status: int) -> None:
+        # a refusal of the API under the audit's path is JSON, as one of /api/
+        rest = self._within(path)
+        super().send_message(path if rest is None else rest or '/', text, status)
 
     # who ----
 
@@ -339,11 +407,11 @@ class AuditHandler(L.GuardedHandler, BaseHTTPRequestHandler):
     def _claim(self, method: str, token: str) -> None:
         if not self.open:
             return super()._claim(method, token)
-        # beside another audit a bare /c/ may be a link of either: the page at / leads to both; under the prefix,
-        # the part's own page
+        # beside another audit a bare /c/ may be a link of either: the page at / leads to both; under the --audit-with
+        # part's former prefix, or alone, the part's own page
         if self.entry is not None:
             return self.send_message('/c/', 'These audits take no links: open /, type your name and choose one.', 404)
-        self.send_message('/c/', f'This audit takes no links: open {self.base_path}/audit and type your name.', 404)
+        self.send_message('/c/', f'This audit takes no links: open {self.base_path} and type your name.', 404)
 
     def _auditor(self) -> tuple[str, str | None] | None:
         """(the auditor's name, their subset), or None after answering why not: the link's (GuardedHandler
@@ -361,8 +429,8 @@ class AuditHandler(L.GuardedHandler, BaseHTTPRequestHandler):
         """why a typed name cannot be used now, or None: the answers files of its file form (in any case and
         Unicode form, as a file system blind to them would open them) hold no other name's answers and no
         answer saved through a link, the file the name writes is listed under that very name, and its answers
-        so far were saved under the scope it chose. The other name is never said: typing it would show its
-        answers."""
+        so far were saved under the scope it chose. The other name is never said here: typing it would show its
+        answers (the agreement page lists the names with answers, to anyone: audit_agreement)."""
         form, own = folded(C.safe_name(name)), f'{C.safe_name(name)}.jsonl'
         taken = (409, 'another name already uses the file of this name (it differs in case, punctuation or accents): '
                       'type another name')
@@ -481,11 +549,36 @@ class AuditHandler(L.GuardedHandler, BaseHTTPRequestHandler):
     def _home(self, request: L.Request) -> None:
         if self.entry is not None:
             return self.send_html(self.entry)
-        self.send_body(303, 'text/plain', b'', (('location', f'{self.base_path}/audit'),))
+        self._to_page(request)
+
+    def _to_page(self, request: L.Request) -> None:
+        """a former address of the page (/audit, and / of an audit served alone), or the page's path with a slash after
+        it: a redirect to the page, with the query it came with"""
+        self._see_other(self.base_path)
+
+    def _to_agreement(self, request: L.Request) -> None:
+        """the agreement page's path with a slash after it: a redirect to the agreement page, with the query"""
+        self._see_other(self.base_path + '/agreement')
+
+    def _see_other(self, path: str) -> None:
+        query = urllib.parse.urlsplit(self.path).query
+        self.send_body(303, 'text/plain', b'', (('location', path + (f'?{query}' if query else '')),))
 
     def _page(self, request: L.Request) -> None:
         page = OPEN_AUDIT_PAGE if self.open else AUDIT_PAGE
         self.send_html(homed(page, self.open) if self.together else page)
+
+    def _agreement_page(self, request: L.Request) -> None:
+        # the auditors' agreement, reached by its address only; served beside another audit, it links back to the entry
+        page = G.page(self.AGREEMENT, self.base_path)
+        self.send_html(homed(page, False) if self.together else page)
+
+    def _agreement(self, request: L.Request) -> None:
+        # read from the answers as they are now: the names, and two names' agreement (?a=NAME&b=NAME, else the pair
+        # compared first); counts and statistics only
+        status, data = G.agreement(self.AGREEMENT, self.audit, self.artifacts, self.campaign.data(), self.open,
+                                   _first(request.query, 'a'), _first(request.query, 'b'))
+        self.send_json(data, status)
 
     def _boot(self, request: L.Request) -> None:
         who = self._auditor()
@@ -518,7 +611,7 @@ class AuditHandler(L.GuardedHandler, BaseHTTPRequestHandler):
         self.send_json({'progress': progress})
 
     def _url(self, item_id: str, name: str | None) -> str | None:
-        return f'/audit/img/{item_id}/{name}{self._media_query()}' if name else None
+        return f'{self.base_path}/img/{item_id}/{name}{self._media_query()}' if name else None
 
     def _item(self, request: L.Request) -> None:
         who = self._auditor()
@@ -539,7 +632,7 @@ class AuditHandler(L.GuardedHandler, BaseHTTPRequestHandler):
             out.update(pupil=item['pupil'], image=self._url(item_id, item.get('image')),
                        answer=(own.get('roster') or {}).get('answer'))
         elif item['part'] == 'speech':
-            out.update(clip=f'/audit/clip/{item_id}{self._media_query()}',
+            out.update(clip=f'{self.base_path}/clip/{item_id}{self._media_query()}',
                        answer=(own.get('speech') or {}).get('answer'))
         else:
             view = self.audit['sessions'][alias]['view']
@@ -785,7 +878,7 @@ def _part(args, artifacts: Path, audit_id: str, sweeps: int | None, opened: bool
         raise A.AuditError(f'{typed} answers of audit {audit_id} were typed on the open page: serve it with --audit-open '
                            '(a link would show the answers typed under its name as its own)')
     return {'id': audit_id, 'audit': audit, 'cls': base, 'folder': folder, 'campaign': campaign, 'modules': modules,
-            'task': task}
+            'task': task, 'base': base.base_path}
 
 
 def _others(artifacts: Path, args) -> list:
@@ -813,14 +906,21 @@ def _handler(part: dict, artifacts: Path, log: L.RequestLog, allow: tuple, opene
 
 
 def _start_fields(part: dict, args, others: list, opened: bool) -> dict:
-    """what a part's start line records besides code_locked.serve's own fields"""
+    """what a part's start line records besides code_locked.serve's own fields: among them the path the audit is served
+    under (`prefix`)"""
     extra = {'audit_id': part['id'], 'plan_sha256': L.file_sha256(part['folder'] / A.PLAN_FILE),
              'mode': part['audit']['mode'], 'campaign_sha256': L.file_sha256(part['campaign'].path),
-             'another_instances': others or None, 'allow_wide': bool(args.allow_wide), **part['task']}
+             'another_instances': others or None, 'allow_wide': bool(args.allow_wide), **part['task'],
+             'prefix': part['base']}
     if opened:
         # the scorer reads the audit as open from this line: names typed, not authenticated
         extra['open'] = True
     return extra
+
+
+def _addresses(bind: str, port: int, base: str) -> str:
+    """what the start message says of a part's addresses: its page and the agreement page beside it"""
+    return f'http://{bind}:{port}{base} (agreement: {base}/agreement)'
 
 
 def _served(part: dict, unrendered: int, opened: bool) -> str:
@@ -846,7 +946,7 @@ def cmd_serve(args, argv) -> int:
     handler = _handler(part, artifacts, log, allow, opened)
     L.watch_campaign(part['campaign'], log)
     extra = _start_fields(part, args, others, opened)
-    print(f"{_served(part, unrendered, opened)}; http://{args.bind}:{port}/audit for "
+    print(f"{_served(part, unrendered, opened)}; {_addresses(args.bind, port, part['base'])}, for "
           f"{', '.join(str(n) for n in allow)} (Ctrl-C stops)")
     try:
         return L.serve(handler, args.bind, port, argv, part['modules'], extra)
@@ -857,17 +957,23 @@ def cmd_serve(args, argv) -> int:
 
 # ---- two audits at one address ----
 
-# the path prefix of the audit served beside another (--audit-with): its routes, its page and every address it is sent
+# the path prefix the addresses of the audit served beside another (--audit-with) had before the paths were unified
+# (/t/audit, /t/api/audit/..., /t/audit/clip/...): they are answered still, and its links' cookie and the keys its open
+# page keeps the name under are named by it as before
 WITH_PREFIX = '/t'
+# what the path of a second audit of one kind served beside the first ends with: two transcription audits are served at
+# /transcription and /transcription-2
+SECOND_SUFFIX = '-2'
 
 
 class TogetherHandler(BaseHTTPRequestHandler):
     """two audits served at one address (--audit ID --audit-with ID2), each by its own handler class: a request whose
-    path is WITH_PREFIX or begins with it and a slash goes to the --audit-with part, the prefix taken off (/t/audit is
-    its /audit); a link's /c/<token> to the part whose campaign.yml holds the token; every other request, / among
-    them, to the --audit part as it came. The part answers and logs the request as its server alone would: this class
-    only hands it over, on the connection and with the headers already read."""
-    # ((prefix, the part's handler class), ...): the --audit part first, its prefix ''
+    path is a part's base path or lies under it goes to that part as it came (/sensing/..., /transcription/...); one
+    whose path is WITH_PREFIX or begins with it and a slash, a former address of the --audit-with part, goes to that
+    part with the prefix taken off (/t/audit is its /audit); a link's /c/<token> to the part whose campaign.yml holds
+    the token; every other request, / among them, to the --audit part as it came. The part answers and logs the request
+    as its server alone would: this class only hands it over, on the connection and with the headers already read."""
+    # ((former prefix, the part's handler class), ...): the --audit part first, its prefix ''
     parts: tuple = ()
     server_version = 'mmla'
     sys_version = ''
@@ -887,6 +993,10 @@ class TogetherHandler(BaseHTTPRequestHandler):
     def _part(self) -> tuple[type, str]:
         """the handler class of the part a request goes to, and the request's path as that part sees it"""
         url = urllib.parse.urlsplit(self.path)
+        for _, handler in self.parts:
+            base = handler.base_path
+            if url.path == base or url.path.startswith(base + '/'):
+                return handler, self.path
         for prefix, handler in self.parts:
             if prefix and (url.path == prefix or url.path.startswith(prefix + '/')):
                 rest = url.path[len(prefix):] or '/'
@@ -973,9 +1083,10 @@ def serve_together(handler: type, bind: str, port: int, argv: list[str], modules
 
 
 def cmd_serve_together(args, argv) -> int:
-    """--audit ID --audit-with ID2: both audits from one server at one address. The --audit part is served as it is
-    alone; the --audit-with part, a transcription audit, under WITH_PREFIX; / leads to both. Each part is refused as
-    it would be alone, --audit-open serves both open and --audit-sweeps the sweeps of the transcription audit(s)."""
+    """--audit ID --audit-with ID2: both audits from one server at one address, each under its path as it is alone (a
+    second transcription audit under /transcription-2); the --audit-with part, a transcription audit, also answers its
+    former addresses under WITH_PREFIX; / leads to both. Each part is refused as it would be alone, --audit-open serves
+    both open and --audit-sweeps the sweeps of the transcription audit(s)."""
     artifacts, first, second = A._artifacts(args), args.audit, args.audit_with
     if first == second:
         raise A.AuditError(f'--audit-with names {second}, the audit --audit serves: give the other audit')
@@ -988,13 +1099,14 @@ def cmd_serve_together(args, argv) -> int:
     if sweeps is not None and 'transcript' not in tasks.values():
         raise A.AuditError(f'neither {first} nor {second} is a transcription audit: --audit-sweeps serves the sweeps '
                            'of a transcription audit')
-    # a sensing audit's page asks for /audit and /api/audit/ itself: under a prefix its requests would reach the other
+    # a sensing audit's page is served at /sensing only, and its open page keeps the name under the keys of a page
+    # served alone (those of the --audit part): it is the --audit part, and one per server
     if tasks[second] != 'transcript':
         if tasks[first] == 'transcript':
-            raise A.AuditError(f'{second} is a sensing audit, whose page asks for /audit and /api/audit/ itself: '
-                               f'serve it as --audit (--audit {second} --audit-with {first})')
-        raise A.AuditError(f'{first} and {second} are both sensing audits, whose pages ask for /audit and /api/audit/ '
-                           'themselves: serve one of them alone, on a port of its own (-p)')
+            raise A.AuditError(f'{second} is a sensing audit, whose page keeps the name under the keys of a page '
+                               f'served alone: serve it as --audit (--audit {second} --audit-with {first})')
+        raise A.AuditError(f'{first} and {second} are both sensing audits, whose pages are both served at /sensing: '
+                           'serve one of them alone, on a port of its own (-p)')
     opened = bool(getattr(args, 'audit_open', None))
     folders = [A.audit_dir(artifacts, audit_id) for audit_id in (first, second)]
     parts = []
@@ -1004,7 +1116,9 @@ def cmd_serve_together(args, argv) -> int:
                          folders)
         except A.AuditError as error:
             raise A.AuditError(f'audit {audit_id}: {error}') from None
-        parts.append({**part, 'prefix': prefix})
+        # a second audit of the kind of the first is served at a path of its own
+        base = part['base'] + (SECOND_SUFFIX if parts and parts[0]['base'] == part['base'] else '')
+        parts.append({**part, 'prefix': prefix, 'base': base})
     allow = (open_bind if opened else L.check_bind)(args.bind, args.allow_from, args.allow_wide)
     port = args.port if L._explicit_port(argv) else DEFAULT_PORT
     code_port = CODE_PORT if getattr(args, 'audit_code_port', None) is None else args.audit_code_port
@@ -1016,25 +1130,27 @@ def cmd_serve_together(args, argv) -> int:
                            'or 0 to leave it out')
     others = _others(artifacts, args)
     unrendered = [_unrendered(part) for part in parts]
-    entry = entry_page([(part['prefix'], part['cls'].CHOICE, part['id']) for part in parts], code_port, opened)
+    entry = entry_page([(part['base'], part['prefix'], part['cls'].CHOICE, part['id']) for part in parts], code_port,
+                       opened)
     logs = [L.RequestLog(part['folder'] / L.LOG_FILE) for part in parts]
     try:
         handlers = []
         for part, log in zip(parts, logs):
-            # the --audit part serves / as the page that leads to both; the other has its prefix, its links its own home
-            fields = ({'base_path': part['prefix'], 'HOME': f"{part['prefix']}/audit"} if part['prefix']
-                      else {'entry': entry})
+            # each part under its path; the --audit part serves / as the page that leads to both, the other answers its
+            # former addresses under its prefix
+            fields = {'base_path': part['base'],
+                      **({'former_path': part['prefix']} if part['prefix'] else {'entry': entry})}
             handlers.append(_handler(part, artifacts, log, allow, opened, together=True, **fields))
             L.watch_campaign(part['campaign'], log)
         handler = L.handler_class(TogetherHandler, parts=tuple((part['prefix'], h) for part, h in zip(parts, handlers)))
         # the server runs the modules of both parts: each start line names them all, and the coding page's port the
         # entry links to (0: none), since that page shows the system's transcripts
         modules = tuple(dict.fromkeys(name for part in parts for name in part['modules']))
-        starts = [{**_start_fields(part, args, others, opened), 'prefix': part['prefix'],
-                   'together_with': {'audit_id': other['id'], 'prefix': other['prefix']}, 'code_port': code_port}
+        starts = [{**_start_fields(part, args, others, opened),
+                   'together_with': {'audit_id': other['id'], 'prefix': other['base']}, 'code_port': code_port}
                   for part, other in zip(parts, reversed(parts))]
         for part, count in zip(parts, unrendered):
-            print(f"{_served(part, count, opened)}; http://{args.bind}:{port}{part['prefix']}/audit")
+            print(f"{_served(part, count, opened)}; {_addresses(args.bind, port, part['base'])}")
         coding = f' and to the coding page on port {code_port}' if code_port else ''
         print(f"both at http://{args.bind}:{port}/, a page that leads to each{coding}, for "
               f"{', '.join(str(n) for n in allow)} (Ctrl-C stops)")
@@ -1081,13 +1197,15 @@ function show(id, on) { $(id).style.display = on ? '' : 'none'; }
 // Enter and space on a button, a link or a list that has the focus are its own: the browser presses, follows or opens
 // it, and no key of the page acts on them (any other key still does; a click hands the focus back to the page)
 function controlKey(e) { return (e.key === 'Enter' || e.key === ' ') && ['BUTTON', 'A', 'SELECT', 'SUMMARY'].includes((e.target || {}).tagName); }
+// where the server serves this page's routes: the audit's path, the page's own
+const BASE = '/sensing';
 // the auditor is the one the personal link named: the page sends no name, and keeps none
 async function api(path) {
-  const r = await fetch(path); const data = await r.json().catch(() => ({}));
+  const r = await fetch(BASE + path); const data = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(data.error || `status ${r.status}`); return data;
 }
 async function post(body) {
-  const r = await fetch('/api/audit/answer', {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify(body)});
+  const r = await fetch(BASE + '/api/answer', {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify(body)});
   const data = await r.json().catch(() => ({}));
   if (!r.ok || !data.ok) throw new Error(data.error || `status ${r.status}`); return data;
 }
@@ -1186,7 +1304,7 @@ async function open(at) {
 async function load(at) {
   pos = Math.max(0, Math.min(at, seq.length));
   if (pos >= seq.length) { item = null; phase = null; st = null; paint(); return; }
-  try { item = await api(`/api/audit/item?item=${encodeURIComponent(seq[pos].item)}`); }
+  try { item = await api(`/api/item?item=${encodeURIComponent(seq[pos].item)}`); }
   catch (e) { said(`cannot load the item: ${e.message}`, 'bad'); return; }
   said('');
   $('note').value = '';
@@ -1290,7 +1408,7 @@ async function onKey(e) {
 }
 
 async function start() {
-  try { boot = await api('/api/audit/boot'); }
+  try { boot = await api('/api/boot'); }
   catch (e) { said(`cannot start: ${e.message}`, 'bad'); return; }
   auditor = boot.auditor; seq = boot.sequence;
   $('who').textContent = `Auditing as ${auditor}${boot.subset ? ` (${boot.subset} items)` : ''}${boot.mode === 'verify' ? ' · verify mode' : ''}`;
@@ -1410,7 +1528,7 @@ OPEN_FLOW = (
     "// boot request Start sends, the name and scope the page's own only once the server takes them; its refusal, if any.\n"
     "// The item of the name before is dropped then, so a first item that fails to load leaves nothing of it to answer\n"
     "async function start(name, chosen) {\n"
-    "  try { boot = await api('/api/audit/boot', [name, chosen]); }\n"
+    "  try { boot = await api('/api/boot', [name, chosen]); }\n"
     "  catch (e) { return `cannot start: ${e.message}`; }\n"
     "  auditor = name; scope = chosen; renaming = null; forgetItem();\n"
     "  remember(stored('auditor'), auditor); remember(stored('auditScope'), scope); keepTab();\n"
@@ -1450,23 +1568,24 @@ OPEN_AUDIT_PAGE = _patched(AUDIT_PAGE, [
      '<button type="submit">Start</button><div id="namestatus"></div></form>\n'
      '<main id="work" style="display:none"><section id="left">'),
     ("// the auditor is the one the personal link named: the page sends no name, and keeps none\n"
-     "async function api(path) {\n  const r = await fetch(path);",
+     "async function api(path) {\n  const r = await fetch(BASE + path);",
      "// the auditor is the name typed in (an open audit): every request carries it and the scope chosen, and the\n"
      "// browser remembers both for the next visit\n"
      "let scope = null;\n"
      "function recall(key) { try { return localStorage.getItem(key); } catch (e) { return null; } }\n"
      "function remember(key, value) { try { localStorage.setItem(key, value); } catch (e) {} }\n"
-     "// the page is served at the root, and keeps the name and scope under these very keys\n"
+     "// the page keeps the name and scope under these very keys, those of a page served alone (as when it was served\n"
+     "// at /audit), where the entry writes them\n"
      "function stored(key) { return key; }\n"
      "// nothing of an item is left unsaved by this page: it may always leave one\n"
      "function mayLeave() { return true; }\n"
      "// the item shown, dropped (its clip stopped) when the page starts under another name or asks for one\n"
      "function forgetItem() { item = null; phase = null; st = null; const v = $('video'); if (v.pause) v.pause(); }\n"
      + OPEN_NAMED +
-     "async function api(path, as) {\n  const r = await fetch(named(path, as));"),
-    ("const r = await fetch('/api/audit/answer', {", "const r = await fetch(named('/api/audit/answer'), {"),
+     "async function api(path, as) {\n  const r = await fetch(BASE + named(path, as));"),
+    ("const r = await fetch(BASE + '/api/answer', {", "const r = await fetch(BASE + named('/api/answer'), {"),
     ("async function start() {\n"
-     "  try { boot = await api('/api/audit/boot'); }\n"
+     "  try { boot = await api('/api/boot'); }\n"
      "  catch (e) { said(`cannot start: ${e.message}`, 'bad'); return; }\n",
      "// the name form, filled with what this browser remembers (or `kept`, a name and scope just refused); Enter or Start\n"
      "// begins\n"
@@ -1543,7 +1662,8 @@ const TASKS = {};
 const NAME_BYTES = 100;
 function recall(key) { try { return localStorage.getItem(key); } catch (e) { return null; } }
 function remember(key, value) { try { localStorage.setItem(key, value); } catch (e) {} }
-// the keys an open audit page reads its name and scope from (its stored()): a part under a prefix has keys of its own
+// the keys an open audit page reads its name and scope from (its stored()): the --audit-with part keeps its keys under
+// the prefix its addresses had before (/t), as it did then
 function stored(prefix, key) { return prefix ? `${prefix}/${key}` : key; }
 // this tab's name (sessionStorage: this tab's own, under TAB_NAME_KEY): the one a choice here last opened a part under,
 // or the one a part's page last went back here with through its link
@@ -1639,17 +1759,18 @@ ENTRY_LINKS = '<p>Choose what you do. Each audit keeps its own answers.</p>'
 
 def entry_page(parts, code_port: int, opened: bool) -> str:
     """ENTRY_PAGE with its tasks, in order: the coding page, the address alone of port `code_port` on the host the page
-    is opened at (left out at 0), then each part ((its prefix, (title, what it asks), audit id), ...): served open, a button per scope,
-    which writes the name and the scope where that part's page reads them (the script's TASKS), hands them to it in the
-    tab, then opens it at #start, which starts it under them; with links, a link to its page. Two parts of one title are told apart by their audit
+    is opened at (left out at 0), then each part ((its page, the prefix of the keys its open page keeps the name and
+    scope under, (title, what it asks), audit id), ...): served open, a button per scope, which writes the name and the
+    scope where that part's page reads them (the script's TASKS), hands them to it in the tab, then opens it at #start,
+    which starts it under them; with links, a link to its page. Two parts of one title are told apart by their audit
     ids."""
-    titles = [choice[0] for _, choice, _ in parts]
+    titles = [choice[0] for _, _, choice, _ in parts]
     blocks, tasks = [], {}
     if code_port:
         blocks.append(f'<a class="part" id="code" href="#"><b>{html.escape(CODE_CHOICE[0])}</b>'
                       f'<span>{html.escape(CODE_CHOICE[1])}</span></a>')
-    for index, (prefix, (title, what), audit_id) in enumerate(parts):
-        shown, page = html.escape(f'{title} ({audit_id})' if titles.count(title) > 1 else title), f'{prefix}/audit'
+    for index, (page, prefix, (title, what), audit_id) in enumerate(parts):
+        shown = html.escape(f'{title} ({audit_id})' if titles.count(title) > 1 else title)
         if not opened:
             blocks.append(f'<a class="part" href="{html.escape(page)}"><b>{shown}</b>'
                           f'<span>{html.escape(what)}</span></a>')

@@ -16,21 +16,23 @@ practice whose transcription that name saved before the close, and only to a nam
 (the reliability subset is never shown it). Until then no response carries any system output: no text, word
 count, score, stratum, rank, weight or session id.
 
-Served beside another audit at one address (audit_page: --audit ID --audit-with THIS), every route is under a path
-prefix (/t/audit, /t/api/audit/..., /t/audit/clip/...): the handler's `base_path`, which the server puts before
-every address it sends and writes into the page (based()), so the page sends its requests there and its browser
-keeps the name and scope under keys of their own. Served alone, the base path is '' and the pages are
-TRANSCRIPT_PAGE and OPEN_TRANSCRIPT_PAGE as they are. Served beside another audit, the page also links back to the
-entry from its header (homed), and leaving through that link asks first when the item shown has changes not saved,
-and does nothing while a save is sent or an item loads, as a move to another item does; open, the page hands the
-name it audits under to the entry, which fills it in.
+The audit is served under /transcription, alone or beside another audit (audit_page: the handler's `base_path`): its
+page is /transcription, its API /transcription/api/..., its clips /transcription/clip/..., its agreement page
+/transcription/agreement, and the pages send their requests there (BASE); a second transcription audit served beside
+another is served under /transcription-2, which the server writes into its page (based()). The addresses of before
+(/audit, /api/audit/..., /audit/clip/..., under /t for the --audit-with part) are answered still, the page's with a
+redirect. The open page keeps the name and scope under the keys it kept them under before (KEPT_UNDER: none alone,
+/t/... for the --audit-with part), so a name the browser remembers is still found. Served beside another audit, the page
+also links back to the entry from its header (homed), and leaving through that link asks first when the item shown
+has changes not saved, and does nothing while a save is sent or an item loads, as a move to another item does; open,
+the page hands the name it audits under to the entry, which fills it in.
 
 The sequence: the practice block (the practice windows of each recording, in the plan's order), then sweep by
 sweep each recording's windows of that sweep in its view's order, the recordings in the plan's order (reversed
 for the reliability subset, which gets only the flagged windows). Only the sweeps up to --audit-sweeps (default
 the plan's, 1) are served: an item of a later sweep is not in the sequence, not counted and not sent (404), and
 neither is its clip, so a later sweep can be served without drawing, freezing or rendering after any answer.
-Each item has one clip of the camera grid with the table microphone (/audit/clip/<item>) and, in a session whose
+Each item has one clip of the camera grid with the table microphone (/transcription/clip/<item>) and, in a session whose
 personal microphones fed the text, one with their sum (?channel=worn); the view's span says where in the clip
 the window lies.
 
@@ -431,6 +433,8 @@ class TranscriptHandler(P.AuditHandler):
     TITLE = 'Transcription audit'
     CHOICE = ('Danish transcription', 'What is said in a short clip, written down word for word, then a few questions '
                                       'about it.')
+    AGREEMENT = 'transcription'
+    base_path = '/transcription'
 
     def _visible(self, subset) -> list[str]:
         return sequence(self.audit, subset)
@@ -454,7 +458,7 @@ class TranscriptHandler(P.AuditHandler):
 
     def _page(self, request: L.Request) -> None:
         page = OPEN_TRANSCRIPT_PAGE if self.open else TRANSCRIPT_PAGE
-        self.send_html(based(homed(page, self.open) if self.together else page, self.base_path))
+        self.send_html(based(homed(page, self.open) if self.together else page, self.base_path, self.former_path))
 
     def _boot(self, request: L.Request) -> None:
         who = self._auditor()
@@ -494,11 +498,11 @@ class TranscriptHandler(P.AuditHandler):
         self.send_json({'progress': progress, 'phase': 'transcribe' if closed is None else 'reveal'})
 
     def _clip_url(self, item_id: str, channel: str) -> str:
-        # under the prefix the audit is served at (audit_page: --audit-with), as every address the page is sent
+        # under the path the audit is served at, as every address the page is sent
         query = self._media_query()
         if channel == 'main':
-            return f'{self.base_path}/audit/clip/{item_id}{query}'
-        return (f"{self.base_path}/audit/clip/{item_id}{query}{'&' if query else '?'}"
+            return f'{self.base_path}/clip/{item_id}{query}'
+        return (f"{self.base_path}/clip/{item_id}{query}{'&' if query else '?'}"
                 f"{urllib.parse.urlencode({'channel': channel})}")
 
     def _item(self, request: L.Request) -> None:
@@ -694,15 +698,16 @@ function show(id, on) { $(id).style.display = on ? '' : 'none'; }
 // Enter and space on a button, a link or the help's summary that has the focus are its own: the browser presses,
 // follows or folds it, and no key of the page acts on them (any other key still does; a click hands the focus back)
 function controlKey(e) { return (e.key === 'Enter' || e.key === ' ') && ['BUTTON', 'A', 'SELECT', 'SUMMARY'].includes((e.target || {}).tagName); }
-// where the server serves this page's routes: the path prefix of an audit served beside another, set by the server
-const BASE = '';
+// where the server serves this page's routes: the audit's path, the page's own (a second transcription audit served
+// beside another has a path of its own, set by the server)
+const BASE = '/transcription';
 // the auditor is the one the personal link named: the page sends no name, and keeps none
 async function api(path) {
   const r = await fetch(BASE + path); const data = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(data.error || `status ${r.status}`); return data;
 }
 async function post(body) {
-  const r = await fetch(BASE + '/api/audit/answer', {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify(body)});
+  const r = await fetch(BASE + '/api/answer', {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify(body)});
   const data = await r.json().catch(() => ({}));
   if (!r.ok || !data.ok) throw new Error(data.error || `status ${r.status}`); return data;
 }
@@ -939,7 +944,7 @@ async function load(at, ticket) {
   const to = Math.max(0, Math.min(at, seq.length));
   let next = null;
   if (to < seq.length) {
-    try { next = await api(`/api/audit/item?item=${encodeURIComponent(seq[to].item)}`); }
+    try { next = await api(`/api/item?item=${encodeURIComponent(seq[to].item)}`); }
     catch (e) { if (ticket === loads) said(`cannot load the item: ${e.message}`, 'bad'); return; }
     if (ticket !== loads) return;
   }
@@ -1002,7 +1007,7 @@ async function onKey(e) {
 }
 
 async function start() {
-  try { boot = await api('/api/audit/boot'); }
+  try { boot = await api('/api/boot'); }
   catch (e) { said(`cannot start: ${e.message}`, 'bad'); return; }
   auditor = boot.auditor; seq = boot.sequence; cb = boot.codebook; build();
   $('who').textContent = `Auditing as ${auditor}${boot.subset ? ` (${boot.subset} items)` : ''}${boot.blind_closed ? ' · your blind pass is closed' : ''}`;
@@ -1064,16 +1069,19 @@ OPEN_TRANSCRIPT_PAGE = _patched(TRANSCRIPT_PAGE, [
      "let scope = null;\n"
      "function recall(key) { try { return localStorage.getItem(key); } catch (e) { return null; } }\n"
      "function remember(key, value) { try { localStorage.setItem(key, value); } catch (e) {} }\n"
-     "function stored(key) { return BASE ? `${BASE}/${key}` : key; }\n"
+     "// the prefix of those keys, set by the server: the one the page's addresses had before they moved under BASE\n"
+     "// (none alone, /t beside another audit), so a name this browser remembers from then is still found\n"
+     "const KEPT_UNDER = '';\n"
+     "function stored(key) { return KEPT_UNDER ? `${KEPT_UNDER}/${key}` : key; }\n"
      "// an item with changes not saved is left only once the auditor agrees\n"
      "function mayLeave() { return !dirty() || confirm(LEAVE); }\n"
      "// the item shown, dropped (its player stopped) when the page starts under another name or asks for one\n"
      "function forgetItem() { stopPlayer(); item = null; phase = null; savedForm = null; listen = null; }\n"
      + P.OPEN_NAMED +
      "async function api(path, as) {\n  const r = await fetch(BASE + named(path, as));"),
-    ("const r = await fetch(BASE + '/api/audit/answer', {", "const r = await fetch(BASE + named('/api/audit/answer'), {"),
+    ("const r = await fetch(BASE + '/api/answer', {", "const r = await fetch(BASE + named('/api/answer'), {"),
     ("async function start() {\n"
-     "  try { boot = await api('/api/audit/boot'); }\n"
+     "  try { boot = await api('/api/boot'); }\n"
      "  catch (e) { said(`cannot start: ${e.message}`, 'bad'); return; }\n",
      "// the name form, filled with what this browser remembers (or `kept`, a name and scope just refused); Enter or Start\n"
      "// begins\n"
@@ -1093,20 +1101,31 @@ OPEN_TRANSCRIPT_PAGE = _patched(TRANSCRIPT_PAGE, [
 ])
 
 
-# the line of the pages' script that says where their routes are: an audit served beside another (audit_page,
-# --audit-with) is served under a path prefix, which the server writes into it
-BASE_LINE = "const BASE = '';"
+# the line of the pages' script that says where their routes are (the audit's path), which the server writes into a
+# second transcription audit's page served beside another (audit_page, --audit-with), and the line of the open page's
+# script that says the prefix of the keys it keeps the name and scope under, which the server writes into the page of
+# the --audit-with part
+BASE_LINE = "const BASE = '/transcription';"
+KEYS_LINE = "const KEPT_UNDER = '';"
 
 
-def based(page: str, base: str) -> str:
-    """a transcription page as served under the path prefix `base`, its requests sent there; the page as it is when the
-    audit is served alone (base '')"""
-    if not base:
-        return page
-    if page.count(BASE_LINE) != 1:
-        raise RuntimeError(f'the transcription page changed: {BASE_LINE!r} is not in it once; update '
+def _set(page: str, line: str, value: str) -> str:
+    if page.count(line) != 1:
+        raise RuntimeError(f'the transcription page changed: {line!r} is not in it once; update '
                            'audit_transcript_page.based')
-    return page.replace(BASE_LINE, f'const BASE = {json.dumps(base)};')
+    return page.replace(line, f'const {line.split()[1]} = {json.dumps(value)};')
+
+
+def based(page: str, base: str, keys: str = '') -> str:
+    """a transcription page as served under the path `base`, its requests sent there, and (the open page) keeping the
+    name and scope under keys of the prefix `keys`; the page as it is under /transcription with keys of no prefix, as
+    when the audit is served alone"""
+    if base != TranscriptHandler.base_path:
+        page = _set(page, BASE_LINE, base)
+    # the link's page keeps nothing in the browser: it has no keys to name
+    if keys and 'localStorage' in page:
+        page = _set(page, KEYS_LINE, keys)
+    return page
 
 
 # what a transcription page served beside another audit adds to audit_page.homed's link back to the entry: leaving

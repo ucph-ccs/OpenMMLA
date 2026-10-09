@@ -15,8 +15,10 @@ A mixed window keeps its main state (the one that fills most of it) and may carr
 (Shift and a class key), saved as `secondary` and `secondary_key` in the same record; an unclear
 window carries none. Every line the server appends carries its own `saved_at`. The page is served
 at /code; the address alone (/) and /audit answer 303 to it with their query, so an older bookmark
-and the Agreement page's links (/?session=...) still open it. The /agreement page, reached by its URL only,
-compares two coders on the listed windows both coded (/api/agreement:
+(/?session=...) still opens it, and /code/ answers 303 to it as well. The /code/agreement page,
+reached by its URL only (/agreement and /code/agreement/ answer 303 to it with their query), links
+to /code and opens each disagreement at /code?session=...&start=..., and compares two coders on the
+listed windows both coded (/api/agreement:
 percent agreement, Cohen's kappa over the five codes, the three classes and two binary splits, a
 lenient share that counts a match with the other's also-state, the confusion matrix and the
 disagreeing windows), and all coders at once with Krippendorff's alpha (/api/agreement?all=1), on
@@ -1023,7 +1025,7 @@ AGREEMENT_PAGE = r"""<!doctype html>
  #status{color:#8c8} #status.fail{color:#f66;font-weight:600}
 </style></head><body>
 <header>
- <a href="/">Coding page</a>
+ <a href="/code">Coding page</a>
  <label>Coder A <select id="a"></select></label>
  <label>Coder B <select id="b"></select></label>
  <label>Session <select id="session"></select></label>
@@ -1095,7 +1097,7 @@ function disagreements(data) {
   if (!data.disagreements.length) return '<h2>Disagreements</h2><p class="meta">none</p>';
   let html = `<h2>Disagreements (${data.disagreements.length})</h2><div class="scroll"><table><tr><th>window</th><th>${esc(data.a)}</th><th>${esc(data.b)}</th><th>consensus</th></tr>`;
   html += data.disagreements.map(d => {
-    const link = `/?session=${encodeURIComponent(d.session)}&start=${d.window_start}`;
+    const link = `/code?session=${encodeURIComponent(d.session)}&start=${d.window_start}`;
     return `<tr><td><a href="${link}">${esc(d.session)} · ${into(d.session, d.window_start)}</a></td><td>${code(d.a)}</td><td>${code(d.b)}</td><td><a href="${link}&coder=adjudicated">adjudicate</a></td></tr>`;
   }).join('');
   return html + '</table></div>';
@@ -1153,6 +1155,13 @@ async function show() {
 })();
 </script></body></html>"""
 
+# the agreement page sits beside the coding page, as each audit's sits beside its own page (audit_page)
+AGREEMENT_PATH = '/code/agreement'
+# former addresses, and each page's path with a slash after it (as on the audits' port), each answered with a 303 to
+# its page and the query it came with
+FORMER_PATHS = {'/': '/code', '/audit': '/code', '/agreement': AGREEMENT_PATH, '/code/': '/code',
+                f'{AGREEMENT_PATH}/': AGREEMENT_PATH}
+
 
 class Handler(BaseHTTPRequestHandler):
     settings: dict[str, Any] = {}
@@ -1182,15 +1191,16 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         url = urllib.parse.urlparse(self.path)
         query = urllib.parse.parse_qs(url.query)
-        if url.path in ('/', '/audit'):
-            # the page's former address: a bookmark or an Agreement page link (/?session=...) opens it with its query;
-            # /audit, a second address coders may be given, leads there too
+        if url.path in FORMER_PATHS:
+            # a former address: a bookmark or an older Agreement page link (/?session=...) opens the page with its
+            # query; /audit, a second address coders may be given, leads there too, and /agreement to the agreement
+            # page; a page's path with a slash after it leads to the page
             self.send_response(303)
-            self.send_header('location', '/code' + (f'?{url.query}' if url.query else ''))
+            self.send_header('location', FORMER_PATHS[url.path] + (f'?{url.query}' if url.query else ''))
             self.send_header('content-length', '0')
             self.end_headers()
-        elif url.path in ('/code', '/agreement'):
-            page = AGREEMENT_PAGE if url.path == '/agreement' else \
+        elif url.path in ('/code', AGREEMENT_PATH):
+            page = AGREEMENT_PAGE if url.path == AGREEMENT_PATH else \
                 entry_linked(PAGE, self.entry_port) if self.entry_port else PAGE
             body = page.encode()
             self.send_response(200)

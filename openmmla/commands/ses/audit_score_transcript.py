@@ -1669,21 +1669,27 @@ def version_deltas(tables: Tables, units: dict[str, list[dict]], populations: di
 
 # ---- the two transcribers ----
 
+def item_pair_counts(answers: dict, a: str, b: str, item: str) -> dict[str, dict]:
+    """of an item both answered, the counts of b's transcript against a's as the reference ('ab') and of a's against
+    b's ('ba'), N1 and over the characters (the scores' S9 and the audit server's agreement page count them alike;
+    a transcript the grammar now refuses raises audit_text.TranscriptError)"""
+    refs = []
+    for name in (a, b):
+        record = ((answers.get(name) or {}).get(item) or {}).get('transcribe') or {}
+        lines = X.parse_reference((record.get('answer') or {}).get('transcript') or '')
+        refs.append([token for line in lines for token in X.normalise(line.tokens)])
+    return {'ab': {**_counts(X.align(refs[0], refs[1])), **_counts(X.cer(refs[0], refs[1]), 'c')},
+            'ba': {**_counts(X.align(refs[1], refs[0])), **_counts(X.cer(refs[1], refs[0]), 'c')}}
+
+
 def pair_counts(designs: dict, answers: dict, a: str, b: str, items: set) -> dict[str, dict]:
     """per item both answered, the counts of b's transcript against a's as the reference ('ab') and of a's against
     b's ('ba'), N1 and over the characters"""
     out = {}
     for design in designs.values():
         for it in design['speech']:
-            if it['item'] not in items:
-                continue
-            refs = []
-            for name in (a, b):
-                record = ((answers.get(name) or {}).get(it['item']) or {}).get('transcribe') or {}
-                lines = X.parse_reference((record.get('answer') or {}).get('transcript') or '')
-                refs.append([token for line in lines for token in X.normalise(line.tokens)])
-            out[it['item']] = {'ab': {**_counts(X.align(refs[0], refs[1])), **_counts(X.cer(refs[0], refs[1]), 'c')},
-                               'ba': {**_counts(X.align(refs[1], refs[0])), **_counts(X.cer(refs[1], refs[0]), 'c')}}
+            if it['item'] in items:
+                out[it['item']] = item_pair_counts(answers, a, b, it['item'])
     return out
 
 
