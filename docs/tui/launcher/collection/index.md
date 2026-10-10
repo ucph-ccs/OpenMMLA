@@ -2,7 +2,7 @@
 
 `Launcher → Collection → Collection Session` records raw audio and video with FFmpeg on one or more machines, into one session. Use it to keep a session's recordings for a later replay through the pipelines with `source: file`, or for coding by hand.
 
-![Collection Session card, Audio tab: Num Audio, the Start Audio, Stop, Stop All Hosts, Logs, Refresh, Download and Delete Remote buttons, the Session ID, Experiment Group and Output Root fields, and the recorder table with Host, Device, Channel, Device Label and Participant](../img/tui/collection.png)
+![Collection Session card, Audio tab: Num Audio, the Start Audio, Stop, Stop All Hosts, Logs, Refresh, Download and Delete Remote buttons, the Session ID, Experiment Group and Output Root fields, and the recorder table with Host, Device, Channel, Device Label and Participant](../../../img/tui/collection.png)
 
 ## Record a session
 
@@ -27,7 +27,7 @@
 |---|---|---|
 | **Num Audio**, **Num Video** | `1` | recorders on each tab, one table row each; `0` skips that role |
 | **Session ID** | `Create MongoDB Session` | an existing session, or a new one from the **Experiment Group**; a session deleted in the Sessions tab is not offered |
-| **Experiment Group** | | the `<experiment>/<group>` a new session is made in ([Experiments](system-settings.md#experiments)) |
+| **Experiment Group** | | the `<experiment>/<group>` a new session is made in ([Experiments](../system-settings.md#experiments)) |
 | **Output Root** | `artifacts` | where every host writes, into `<session>/collection/<host>/`; a remote host reads `artifacts` as `~/artifacts` |
 
 ## Recorder table
@@ -62,14 +62,14 @@ Start refuses two recorders of one tab on the same device of one machine, `each`
 
 ??? info "Details: Rotate"
     - FFmpeg turns the picture as it records, so the file is upright, and the manifest entry notes the turn as `rotate`. A recorder gets `--video-rotate <degrees>`; `0°` passes nothing.
-    - A replay (`scripts/replay_sessions.py`) and `mmla ses-calibrate` read `rotate`, so the IPS and VFA bases turn the camera's intrinsics with the picture and report poses in the sensor's frame ([Calibrate from a recorded session](../pipelines/ips/calibration.md#calibrate-from-a-recorded-session)).
+    - A replay (`scripts/replay_sessions.py`) and `mmla ses-calibrate` read `rotate`, so the IPS and VFA bases turn the camera's intrinsics with the picture and report poses in the sensor's frame ([Calibrate from a recorded session](../../../pipelines/ips/calibration.md#calibrate-from-a-recorded-session)).
     - Every Linux recording is written as 4:2:0 (`format=yuv420p`, after the turn): the camera's MJPEG is 4:2:2, which H.264 would otherwise keep and few players decode.
 
 ??? info "Details: Participant"
     - A `jabra`, and a label a group base pulls, open on Group. Other microphones open on the group's tag ids, lowest first, in natural order of their file names (`vimo-0-ch0 < vimo-0-ch1 < vimo-1`). A recorder's own row reads `per channel` when it has channel rows.
     - The group comes from the Experiment Group for `Create MongoDB Session`, else from the picked session (an inactive experiment's too, else its MongoDB document). Without a participant list the column offers Group and bind later, and Start says so and goes ahead.
     - A pick is kept for that session and device (or channel). A tag another host already bound in the session is only warned about.
-    - The pick goes into the manifest (`participant`, `scope: personal` or `scope: group`), and the session's MongoDB document notes `wearers` by device, which a live ASR base pulling that stream reads ([Personal microphones](../pipelines/asr/speakers-and-diarization.md#personal-microphones-and-energy-attribution)). What is left on bind later is bound with [`mmla ses-tidy`](session-tools.md#microphone-scope-and-wearers).
+    - The pick goes into the manifest (`participant`, `scope: personal` or `scope: group`), and the session's MongoDB document notes `wearers` by device, which a live ASR base pulling that stream reads ([Personal microphones](../../../pipelines/asr/speakers-and-diarization.md#personal-microphones-and-energy-attribution)). What is left on bind later is bound with [`mmla ses-tidy`](session-tools.md#microphone-scope-and-wearers).
 
 ## Buttons
 
@@ -150,3 +150,7 @@ mmla collect-video --device-label c920-01 --rotate 180
 **On a Mac, a camera recorder waits for frames forever, or a microphone records silence.** Terminal has no permission for the camera or the microphone, or nobody is logged in on the Mac's screen ([Recording on a Mac](#recording-on-a-mac)).
 
 **Start refuses two recorders.** Two recorders of one tab are on the same device of one machine. Record its channels with one recorder and **Channel** `each` or a list.
+
+## Pages in this section
+
+- [Bringing recordings in](session-tools.md): `mmla ses-import`, `ses-tidy` and `ses-align`, for recordings made outside this card and for a session's names, wearers and clocks.

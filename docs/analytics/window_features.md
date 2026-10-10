@@ -25,7 +25,7 @@ Persons are tag ids (`p<tag>_...`) and pairs are sorted tag pairs (`pair<a>_<b>_
 
 ## Build a table
 
-1. **Declare the pupils.** Run `mmla ses-tidy <session-id> --pupils 0,1` once per session with the pupils' tags; it writes them into the session's manifest ([Correct a session](../tui/session-tools.md#correct-a-session)). Undeclared, the pupils are the tags up to 12.
+1. **Declare the pupils.** Run `mmla ses-tidy <session-id> --pupils 0,1` once per session with the pupils' tags; it writes them into the session's manifest ([Correct a session](../tui/launcher/collection/session-tools.md#correct-a-session)). Undeclared, the pupils are the tags up to 12.
 2. **Run the fusion**, from InfluxDB or from an export:
 
     ```bash

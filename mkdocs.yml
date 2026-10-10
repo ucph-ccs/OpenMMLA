@@ -63,6 +63,15 @@ plugins:
   - search
   # index.md pulls in the repository README so the landing page has one source
   - include-markdown
+  # addresses these pages had before they sat under tui/launcher/; each forwards to the page
+  - redirects:
+      redirect_maps:
+        tui/system-settings.md: tui/launcher/system-settings.md
+        tui/system-services.md: tui/launcher/system-services.md
+        tui/collection.md: tui/launcher/collection/index.md
+        tui/session-tools.md: tui/launcher/collection/session-tools.md
+        tui/pipelines.md: tui/launcher/pipelines/index.md
+        tui/streams.md: tui/launcher/pipelines/streams.md
 
 nav:
   - Overview: index.md
@@ -73,13 +82,16 @@ nav:
       - Management console (TUI):
           - Overview: tui/index.md
           - Environment tab: tui/environment.md
-          - Launcher tab: tui/launcher.md
-          - System Settings: tui/system-settings.md
-          - System Services: tui/system-services.md
-          - Collection: tui/collection.md
-          - Bringing recordings in: tui/session-tools.md
-          - Pipelines: tui/pipelines.md
-          - Streams tab: tui/streams.md
+          - Launcher tab:
+              - Overview: tui/launcher/index.md
+              - System Settings: tui/launcher/system-settings.md
+              - System Services: tui/launcher/system-services.md
+              - Collection:
+                  - Overview: tui/launcher/collection/index.md
+                  - Bringing recordings in: tui/launcher/collection/session-tools.md
+              - Pipelines:
+                  - Overview: tui/launcher/pipelines/index.md
+                  - Streams tab: tui/launcher/pipelines/streams.md
           - Sessions tab: tui/sessions.md
           - Status tab: tui/status.md
   - Pipelines:

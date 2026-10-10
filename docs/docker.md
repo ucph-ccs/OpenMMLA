@@ -259,9 +259,9 @@ With authentication on, the URL is `mongodb://<user>:<pass>@uber-server.local:27
 | **ASR Server**, **VFA Server** (`Launcher → Pipelines`) | `docker compose -f docker/docker-compose.asr.yml up -d --build <services>`, or `docker-compose.vfa.yml`; AudioInferer picks its container from `backend` | `docker compose ... down` | `docker compose ... logs --tail 40` |
 | **InfluxDB**, **MongoDB**, **Stream Server (MediaMTX)** (`Launcher → System Services`), **Run mode** `docker` | `docker compose -f docker/docker-compose.infra.yml up -d <service>` | `... stop <service>`, not `down`, which would stop the other containers of the shared file | `... logs <service>` |
 
-A remote host runs the same commands over SSH, in its repository directory. The AI server cards show `Running` and `(R)` in the tree while their ports answer. The system service cards probe the address in System Settings from the console's machine, whatever interface `INFRA_BIND_ADDRESS` binds, so a console outside the tailnet or behind a firewall shows them grey even when the pipeline machines connect ([TUI → System Services](tui/system-services.md#status)).
+A remote host runs the same commands over SSH, in its repository directory. The AI server cards show `Running` and `(R)` in the tree while their ports answer. The system service cards probe the address in System Settings from the console's machine, whatever interface `INFRA_BIND_ADDRESS` binds, so a console outside the tailnet or behind a firewall shows them grey even when the pipeline machines connect ([TUI → System Services](tui/launcher/system-services.md#status)).
 
-**Fetch Token**, on the InfluxDB card, reads the stack's admin token from the running container's `/etc/influxdb2/influx-configs`, which also holds a token InfluxDB generated itself, else from `docker/.env`, and warns when the URL's host and the host it read the token from differ ([Card controls](tui/system-services.md#card-controls)).
+**Fetch Token**, on the InfluxDB card, reads the stack's admin token from the running container's `/etc/influxdb2/influx-configs`, which also holds a token InfluxDB generated itself, else from `docker/.env`, and warns when the URL's host and the host it read the token from differ ([Card controls](tui/launcher/system-services.md#card-controls)).
 
 ## Environment variables
 

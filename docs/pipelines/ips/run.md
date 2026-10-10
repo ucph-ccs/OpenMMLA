@@ -44,7 +44,7 @@ A session of one camera needs neither camera sync nor matrices ([One camera](cal
     | **Verbose** (`-v`) | on | print debug output |
 
     ??? info "Details: the card's fields"
-        - **Session**: the first Start mints the session id. Every base card (ASR, IPS and VFA, on any host) then opens on it, so the other cards of the take join it with their own Start ([TUI → One session per take](../../tui/pipelines.md#one-session-per-take)).
+        - **Session**: the first Start mints the session id. Every base card (ASR, IPS and VFA, on any host) then opens on it, so the other cards of the take join it with their own Start ([TUI → One session per take](../../tui/launcher/pipelines/index.md#one-session-per-take)).
         - **Room** `- (the Bases below)` sets nothing.
         - **Base** *n*: Start refuses two bases on one entry.
         - **Main Camera** lists the matrix files exported on the card's host, then each base no file there holds (`· alone, no matrices`, see [One camera](calibration.md#one-camera)). It starts on the `Bases` entry with `main: true` when that is offered, else on the first option, and follows Base 1 to the main of its room. Start refuses a synchronizer until a Main Camera is picked: make the file, copy it to the host, and press **Refresh** on the card.
@@ -53,7 +53,7 @@ A session of one camera needs neither camera sync nor matrices ([One camera](cal
 3. **Press Start.** It opens one terminal window per base and synchronizer, and nothing in them asks anything. Each process starts on the session and waits for START.
 
     ??? info "Details: what Start checks"
-        - Start asks the Stream Server whether the streams the bases pull are live, and holds back once, naming those that are not ([Stream check](../../tui/pipelines.md#stream-check)). Start them on the **Streams** tab, or press **Start** again to start the bases anyway.
+        - Start asks the Stream Server whether the streams the bases pull are live, and holds back once, naming those that are not ([Stream check](../../tui/launcher/pipelines/index.md#stream-check)). Start them on the **Streams** tab, or press **Start** again to start the bases anyway.
         - Start warns, and starts anyway, when a stream the **Streams** tab runs is captured on another machine, recorded or turned otherwise than the config of the card's host says. The bases read that config, and the session notes what it says.
         - Start warns of a stream whose **Rotate** changed since it started; its cell shows both turns in yellow (`180° (runs 0°)`). A running stream keeps the turn it was started with: **Stop** it and **Start** it again.
         - A base whose stream is not up yet says so and waits for it, up to 30 s ([How the bases pull a stream](../../streaming/index.md#bases-pulling-a-stream)), before it says that it waits for START. A START or STOP sent meanwhile is heard once the stream is up.

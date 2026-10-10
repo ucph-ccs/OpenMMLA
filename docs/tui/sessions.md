@@ -18,7 +18,7 @@ A session is often exported the day after it ran. Export before the Stream Serve
 | `Session ID`, `Experiment`, `Group` | the session |
 | `Status` | `active` or `ended`; a row known only from folders shows its manifest's status, else `artifact` or `collection` |
 | `Started` | when it started |
-| `Recordings until` | when the Stream Server begins to delete the session's footage: its start plus the retention on the [Stream Server Config tab](system-services.md#stream-server-config-tab); `kept` when nothing is deleted, `gone` once it has passed. The capture hosts keep theirs as long as each stream's `record_keep_days` says ([Recordings and Manage](streams.md#recordings-and-manage)) |
+| `Recordings until` | when the Stream Server begins to delete the session's footage: its start plus the retention on the [Stream Server Config tab](launcher/system-services.md#stream-server-config-tab); `kept` when nothing is deleted, `gone` once it has passed. The capture hosts keep theirs as long as each stream's `record_keep_days` says ([Recordings and Manage](launcher/pipelines/streams.md#recordings-and-manage)) |
 | `Files here` | what the session's folders take on the disk of the host picked, `-` for none |
 | `Source` | where the row comes from, joined by `+`: `MongoDB@<host>`, `Artifacts` and `Collection Files` (this checkout's folders), `Files@<host>` (another host's folders) |
 
@@ -54,7 +54,7 @@ A row without a session id is refused. The deletes ask first: the first press sa
 | Part | What it fetches | Into |
 |---|---|---|
 | Measurements | one JSON file per event type from InfluxDB, a text transcript, and `<session>_parameters.json`, what the session ran with, from its MongoDB document | `measurements/` |
-| Collection recordings | each recording host's session folder, by the Collection card's [Download](collection.md#downloading-a-session) transfer | `collection/<host>/` |
+| Collection recordings | each recording host's session folder, by the Collection card's [Download](launcher/collection/index.md#downloading-a-session) transfer | `collection/<host>/` |
 | Streams | the session's part of each stream it used: the Stream Server's copy and the capture host's | `streams/server/`, `streams/capture/` |
 | Base files | what its bases and synchronizers wrote on their machines: logs, the config they ran with, what they recorded | `pipelines/<pipeline>/<host>/` |
 
@@ -127,7 +127,7 @@ Nothing is deleted on either side. The log ends with what was sent, was there al
 
 ## End Session
 
-**End Session** marks a session that was left `active` as `ended`, for one whose console closed or whose bases went down before a STOP. The first press says the end it would write and names any base that never noted leaving; the second writes it, and switches off the Stream Server's recording of the session's paths, as STOP does. A running base is better stopped with STOP in [Session Control](pipelines.md#session-control).
+**End Session** marks a session that was left `active` as `ended`, for one whose console closed or whose bases went down before a STOP. The first press says the end it would write and names any base that never noted leaving; the second writes it, and switches off the Stream Server's recording of the session's paths, as STOP does. A running base is better stopped with STOP in [Session Control](launcher/pipelines/index.md#session-control).
 
 ??? info "Details: the end it writes"
     - When its last base left, once every base that joined has. Otherwise the latest moment the session is known to have been alive: its last InfluxDB measurement, a base joining or leaving, or a log its components wrote on this machine (`artifacts/<session>/pipelines/<pipeline>/<this host>/logger/`). A time before the session began (a replay stamps the original recording time) does not count; only when nothing says is it now.
@@ -163,7 +163,7 @@ The first press says in red what goes (the archive's path, files and size, the I
 | `Local` | `artifacts/<session>/` and `collection/<session>/` of this checkout |
 | another host | those of its checkout, `~/artifacts/<session>/`, `~/artifacts/streams/.session-cuts/<session>/`, and the folders the MongoDB document names there (a Collection recorder's own Output Root, a stream's `record_root`) |
 
-A capture host's recordings filed by day ([Recordings and Manage](streams.md#recordings-and-manage)) are not a session's folder and stay.
+A capture host's recordings filed by day ([Recordings and Manage](launcher/pipelines/streams.md#recordings-and-manage)) are not a session's folder and stay.
 
 ??? info "Details: the checks of Delete Files"
     - Each folder is checked again on the host just before it goes. It is deleted only when it is a directory named exactly the session id, letter case included, directly inside one of those folders as the host resolves them. On a Mac, a folder whose name differs in case only is another session's and stays. A symbolic link or file of that name is refused, and the parent folders are never deleted.

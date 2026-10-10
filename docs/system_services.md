@@ -20,7 +20,7 @@ The Docker stack of InfluxDB, MongoDB and MediaMTX is `docker/docker-compose.inf
 
 ### From the console { #from-the-tui }
 
-`Launcher → System Services` has one card per service. Press **Start**, **Stop** or **Logs** on it ([Card controls](tui/system-services.md#card-controls)).
+`Launcher → System Services` has one card per service. Press **Start**, **Stop** or **Logs** on it ([Card controls](tui/launcher/system-services.md#card-controls)).
 
 - Each card opens on the machine its address in System Settings names: this machine, or the SSH profile that matches it. It can be moved to another host for a one-off.
 - A card's status is a TCP probe of that address, so it shows what the pipelines will see.
@@ -230,7 +230,7 @@ The file is gitignored, like the pipeline configs, because it names your machine
 ??? info "Details: how the settings reach the components"
     - When a component starts, the `InfluxDB`, `MongoDB`, `MQTT` and `Redis` sections of the `config/system_services.yml` found above its `config.yml` are laid over those of the `config.yml`, field by field. A field the file does not have keeps the pipeline's value. `OPENMMLA_SYSTEM_SERVICES_CONFIG` names the file instead, when set.
     - A section the pipeline lists under `SystemServicesOverride:` in its `config.yml` stays the pipeline's own, at startup and when the console syncs. So does a section of the file that still holds a `<...>` placeholder.
-    - On the console machine the file and the pipeline configs always agree. On a remote host the file exists once a console has run there, or its Connections forms were saved or synced from another console. Pick that host in the [System Settings](tui/system-settings.md#whose-settings-a-form-shows) forms to see and edit what it will use.
+    - On the console machine the file and the pipeline configs always agree. On a remote host the file exists once a console has run there, or its Connections forms were saved or synced from another console. Pick that host in the [System Settings](tui/launcher/system-settings.md#whose-settings-a-form-shows) forms to see and edit what it will use.
     - Do not edit the synced sections in the pipeline configs by hand: the console overwrites them, and `config/system_services.yml` is what counts at runtime.
     - `Dashboard` is carried by no pipeline config. **Sync to Host** writes it into the other machine's own `config/system_services.yml`, and **Sync from Host** reads it from there.
 

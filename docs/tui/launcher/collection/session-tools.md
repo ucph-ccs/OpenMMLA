@@ -1,6 +1,6 @@
 # Bringing recordings in
 
-Three commands bring recordings made outside the Collection card into a session, and put a session's recordings right: `mmla ses-import` builds the session from a folder of files, `mmla ses-tidy` corrects names, devices and wearers, and `mmla ses-align` puts the recordings on one clock. They work on `artifacts/<session>/`, the same tree the [Collection](collection.md) card writes.
+Three commands bring recordings made outside the Collection card into a session, and put a session's recordings right: `mmla ses-import` builds the session from a folder of files, `mmla ses-tidy` corrects names, devices and wearers, and `mmla ses-align` puts the recordings on one clock. They work on `artifacts/<session>/`, the same tree the [Collection](index.md) card writes.
 
 ## Import recordings
 
@@ -72,7 +72,7 @@ mmla ses-tidy <session-id> -e <experiment-id> \
 | `--tag-size` | the AprilTag size of the session in metres, noted in the session manifest |
 | `--note` | a note kept in the session manifest; repeatable |
 | `--same-class-as SESSION` | marks another session whose participants come from the same class, writing `same_class_as` into both manifests; the link survives rebuilds and follows a renamed session |
-| `--pupils 0,1` | the tag ids of the session's pupils, written as `pupils` into the manifest with a dated note, which `mmla ses-fuse` takes as the session's pupils ([Pupils](../analytics/window_features.md#pupils)); survives rebuilds; `--pupils none` (or `''`) clears them |
+| `--pupils 0,1` | the tag ids of the session's pupils, written as `pupils` into the manifest with a dated note, which `mmla ses-fuse` takes as the session's pupils ([Pupils](../../../analytics/window_features.md#pupils)); survives rebuilds; `--pupils none` (or `''`) clears them |
 | `--prune-legacy` | keeps the speaker profiles (as `collection/<host>/profiles/`) and `meta.txt`, and deletes `legacy/` and the old analysis folders (frames, logs, measurements, exports), which a replay produces again |
 | `--scope`, `--participant`, `--participants-in-order` | the scope and wearer of each microphone ([Microphone scope and wearers](#microphone-scope-and-wearers)) |
 | `-a`, `--artifacts` | the artifacts root; default `<cwd>/artifacts` |
@@ -81,7 +81,7 @@ mmla ses-tidy <session-id> -e <experiment-id> \
 
 ### Microphone scope and wearers
 
-Every audio recording in the manifests has a `scope`, `personal` (a microphone worn by one person) or `group` (a room microphone), and a `participant`, the tag id of its wearer or null. The ASR replay and the fusion read them ([Personal microphones](../pipelines/asr/speakers-and-diarization.md#personal-microphones-and-energy-attribution)).
+Every audio recording in the manifests has a `scope`, `personal` (a microphone worn by one person) or `group` (a room microphone), and a `participant`, the tag id of its wearer or null. The ASR replay and the fusion read them ([Personal microphones](../../../pipelines/asr/speakers-and-diarization.md#personal-microphones-and-energy-attribution)).
 
 | Option | What it does |
 |---|---|

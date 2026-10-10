@@ -57,9 +57,9 @@ The ASR and VFA server services have no conda environment: they run as Docker im
 
 ??? info "Details: Install Tools and Git Pull All"
     - **Install Tools** hands `sudo` the SSH profile's password, or on this machine the Sudo password of System Settings, on its input and never on a command line.
-    - One install runs on a host at a time, the [Streams tab](streams.md#tools-start-installs)'s included; a second press while one runs there is refused. The `System` column is read again afterwards.
+    - One install runs on a host at a time, the [Streams tab](launcher/pipelines/streams.md#tools-start-installs)'s included; a second press while one runs there is refused. The `System` column is read again afterwards.
     - **Git Pull All** skips offline and Windows hosts. It shows each host's output in one piece as it finishes, and a last line sums up which hosts pulled, were already up to date or failed.
-    - A pull stops on a file that a **Sync to Host** changed there when the pull changes the same file ([Sync safety](launcher.md#sync-safety)).
+    - A pull stops on a file that a **Sync to Host** changed there when the pull changes the same file ([Sync safety](launcher/index.md#sync-safety)).
 
 ## Command console
 

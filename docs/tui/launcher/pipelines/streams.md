@@ -1,10 +1,10 @@
 # Streams tab
 
-Every base card (ASR, IPS and VFA) has a **Streams** tab that runs its pipeline's streams: it starts FFmpeg on the machine that captures each camera or microphone, stops it, records it, and shows whether the Stream Server receives it. How streams work in general is in [Streaming](../streaming/index.md).
+Every base card (ASR, IPS and VFA) has a **Streams** tab that runs its pipeline's streams: it starts FFmpeg on the machine that captures each camera or microphone, stops it, records it, and shows whether the Stream Server receives it. How streams work in general is in [Streaming](../../../streaming/index.md).
 
-The streams are the `Streams` entries of the pipeline's config, defined on the card's [Config tab](pipelines.md#config-tab), where `target` takes the path alone (`ips/cam-1`) and **Save** completes it with the Stream Server of System Settings.
+The streams are the `Streams` entries of the pipeline's config, defined on the card's [Config tab](index.md#config-tab), where `target` takes the path alone (`ips/cam-1`) and **Save** completes it with the Stream Server of System Settings.
 
-![A pipeline card's Streams tab: one row per camera stream with its machine, device, Record, Rotate, status and Stream Server column](../img/tui/streams.png)
+![A pipeline card's Streams tab: one row per camera stream with its machine, device, Record, Rotate, status and Stream Server column](../../../img/tui/streams.png)
 
 ## Columns
 
@@ -24,7 +24,7 @@ Rows are listed by name, a number in a name counted as one (`cam-2` before `cam-
 All four picks are written into the card's config on its host. **SSH Profile** and **Device** do not show on the Config tab, and its Save keeps them; **Record** and **Rotate** do. A running stream keeps the machine, Record and Rotate it was started with, so stop it before changing them; it takes a new device at its next Start.
 
 ??? info "Details: the Device list"
-    - Linux microphones come from `arecord -l` (`hw:1,0`), Linux cameras from `v4l2-ctl --list-devices` (`/dev/video0`), a Mac's devices from `ffmpeg -f avfoundation -list_devices` (`:0` for a microphone, `0` for a camera). Microphones show their channel count when the machine says it ([Recorder table](collection.md#recorder-table)).
+    - Linux microphones come from `arecord -l` (`hw:1,0`), Linux cameras from `v4l2-ctl --list-devices` (`/dev/video0`), a Mac's devices from `ffmpeg -f avfoundation -list_devices` (`:0` for a microphone, `0` for a camera). Microphones show their channel count when the machine says it ([Recorder table](../collection/index.md#recorder-table)).
     - Another machine is asked over SSH the first time the list opens, and again after **Refresh**.
     - A device picked for one machine goes when the stream moves to another.
 
@@ -47,7 +47,7 @@ A stream with an `ssh_profile` sends H.264 to MediaMTX for an `rtmp://`, `rtsp:/
     - A Start or Stop sent to a host goes on to its end when the card is refreshed or left, notes what came of it in the stream registry, and still writes its lines into the log.
     - A Refresh notes the start time a host wrote down for a running stream the registry does not have (a log line says so), and notes as stopped a stream whose host has nothing left of it.
     - Stop looks for a stream on the machine its SSH Profile names, which is why a running stream keeps its machine.
-    - A Mac captures through AVFoundation (`device` `0` is its first camera, `:0` its microphone). On a Mac reached over SSH, FFmpeg is started from a Terminal window on its screen, which closes once FFmpeg runs ([Recording on a Mac](collection.md#recording-on-a-mac)).
+    - A Mac captures through AVFoundation (`device` `0` is its first camera, `:0` its microphone). On a Mac reached over SSH, FFmpeg is started from a Terminal window on its screen, which closes once FFmpeg runs ([Recording on a Mac](../collection/index.md#recording-on-a-mac)).
     - The buttons wrap onto another line when the pane is too narrow.
 
 ### Stream status
@@ -64,7 +64,7 @@ A stream with an `ssh_profile` sends H.264 to MediaMTX for an `rtmp://`, `rtsp:/
 | `Name clash` | another card gives this name to another stream; Start does not start it |
 | `Name in use` | its machine runs another card's stream under this name |
 
-A push the Stream Server dropped does not end FFmpeg: it opens the push again every five seconds, and the recording goes on meanwhile. Such a row stays `Running` while **Stream Server** reads `○ not live` ([Declare a stream](../streaming/index.md#devices-pushing-a-stream)).
+A push the Stream Server dropped does not end FFmpeg: it opens the push again every five seconds, and the recording goes on meanwhile. Such a row stays `Running` while **Stream Server** reads `○ not live` ([Declare a stream](../../../streaming/index.md#devices-pushing-a-stream)).
 
 ### Tools Start installs
 
@@ -102,6 +102,6 @@ With an entry's `steady_fps` on, the default, Start sets a Linux camera's `expos
 
 ## Recordings and Manage
 
-A stream with **Record** `yes` also writes a raw recording on its capture host, one file per **Start**, filed by day under `<record_root>/streams/capture/`; **Stop** waits for FFmpeg to finish the file. The Stream Server records its own copy while a session runs, and an external stream has only that one. [Record on the capture host](../streaming/recording.md#on-the-capture-device) has the file layout.
+A stream with **Record** `yes` also writes a raw recording on its capture host, one file per **Start**, filed by day under `<record_root>/streams/capture/`; **Stop** waits for FFmpeg to finish the file. The Stream Server records its own copy while a session runs, and an external stream has only that one. [Record on the capture host](../../../streaming/recording.md#on-the-capture-device) has the file layout.
 
-**Manage** lists the recordings on each capture host (`Host`, `Day`, `Stream`, `Started`, `Last write`, `Length`, `Size`, `State`), with the room left there and the file being written now, and deletes them there; it copies nothing to this machine. [Manage the recordings](../streaming/recording.md#manage-the-recordings) lists its controls. A session's part of both copies comes with [Sessions → Export](sessions.md#export).
+**Manage** lists the recordings on each capture host (`Host`, `Day`, `Stream`, `Started`, `Last write`, `Length`, `Size`, `State`), with the room left there and the file being written now, and deletes them there; it copies nothing to this machine. [Manage the recordings](../../../streaming/recording.md#manage-the-recordings) lists its controls. A session's part of both copies comes with [Sessions → Export](../../sessions.md#export).

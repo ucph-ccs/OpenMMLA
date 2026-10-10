@@ -1,6 +1,6 @@
 # Pipelines
 
-`Launcher → Pipelines` holds a card for every pipeline component: base cards that start bases and synchronizers, server cards that run the AI services, the MLLM Server, the IPS calibration tools, and Session Control, which starts and stops a session. The pipeline guides walk through each one end to end: [ASR](../pipelines/asr/index.md), [IPS](../pipelines/ips/index.md), [VFA](../pipelines/vfa/index.md).
+`Launcher → Pipelines` holds a card for every pipeline component: base cards that start bases and synchronizers, server cards that run the AI services, the MLLM Server, the IPS calibration tools, and Session Control, which starts and stops a session. The pipeline guides walk through each one end to end: [ASR](../../../pipelines/asr/index.md), [IPS](../../../pipelines/ips/index.md), [VFA](../../../pipelines/vfa/index.md).
 
 ## Base cards
 
@@ -8,7 +8,7 @@ The ASR Base, IPS Base and VFA Base cards have a **Launch** tab, a **Config** ta
 
 ### Launch tab
 
-![ASR Base card, Launch tab: Num Bases, Num Synchronizers and Sync Waits For, Start, Session and Experiment Group, and two Base rows, each with its Participant](../img/tui/asr-base.png)
+![ASR Base card, Launch tab: Num Bases, Num Synchronizers and Sync Waits For, Start, Session and Experiment Group, and two Base rows, each with its Participant](../../../img/tui/asr-base.png)
 
 | Field | Cards | Flag | Default | What it does |
 |---|---|---|---|---|
@@ -21,25 +21,25 @@ The ASR Base, IPS Base and VFA Base cards have a **Launch** tab, a **Config** ta
 | **Base 1**, **Base 2**, ... | all | `-b` | the *n*-th `Bases` entry | which `Bases` entry each base is, shown as `0 · c920-01 · stream ips-cam-1` (id, camera or `base_type`, source and index); `ask in its window` passes no `-b` |
 | **Main Camera** | IPS | `-mc` | the entry with `main: true`, following Base 1 to its room's main | one option per `camera_sync/transformation_matrices_<id>.json` on the card's host, then each base no file holds (`· alone, no matrices`: that camera alone, in its own coordinates; Base 1 takes it along) |
 | **Mode** | ASR, VFA | `-m` | `live` | `live`, `capture` or `analyze` |
-| **Language** | ASR | `-lang` | left to the service | the language sent with every transcription request ([Language](../pipelines/asr/speakers-and-diarization.md#language)) |
-| **Diarize** | ASR | `-dia` | `on for group microphones` | which bases also ask for anonymous speaker turns; the default passes no flag, so a base diarizes when its speech goes to the group; `on` and `off` decide for every base ([Diarization](../pipelines/asr/speakers-and-diarization.md#diarize)) |
-| **Participant 1**, ... | ASR | `--participant` | by the base type's `asr_scope` | whom a base's speech is attributed to: a participant of the session's group, **Group**, or **Speakers (speaker verification)** ([Personal microphones](../pipelines/asr/speakers-and-diarization.md#personal-microphones-and-energy-attribution)) |
-| **Speakers 1**, ... | ASR | `-spk` | the group's profiles on the host | under a base on Speakers, the profiles it recognizes; **Manage** ticks them, registers and deletes speakers ([Speakers](../pipelines/asr/speakers-and-diarization.md#speakers)) |
-| **Store Audio** | ASR | `-s` | off | see [Run ASR](../pipelines/asr/run.md#every-session) |
-| **VAD**, **Noise Reduce**, **Transcribe** | ASR | `-vad`, `-nr`, `-tr` | on | see [Run ASR](../pipelines/asr/run.md#every-session) |
-| **Speech Separate**, **Dominant Speaker** | ASR | `-sp`, `-d` | off | see [Run ASR](../pipelines/asr/run.md#every-session) |
-| **Half-Scaled Recognition** | ASR | `-hsr` | on | see [Run ASR](../pipelines/asr/run.md#every-session) |
-| **Graphics** | IPS, VFA | `-g` | `off for streams` | a window on the base's frames ([IPS](../pipelines/ips/run.md#every-session), [VFA](../pipelines/vfa/run.md#every-session)) |
+| **Language** | ASR | `-lang` | left to the service | the language sent with every transcription request ([Language](../../../pipelines/asr/speakers-and-diarization.md#language)) |
+| **Diarize** | ASR | `-dia` | `on for group microphones` | which bases also ask for anonymous speaker turns; the default passes no flag, so a base diarizes when its speech goes to the group; `on` and `off` decide for every base ([Diarization](../../../pipelines/asr/speakers-and-diarization.md#diarize)) |
+| **Participant 1**, ... | ASR | `--participant` | by the base type's `asr_scope` | whom a base's speech is attributed to: a participant of the session's group, **Group**, or **Speakers (speaker verification)** ([Personal microphones](../../../pipelines/asr/speakers-and-diarization.md#personal-microphones-and-energy-attribution)) |
+| **Speakers 1**, ... | ASR | `-spk` | the group's profiles on the host | under a base on Speakers, the profiles it recognizes; **Manage** ticks them, registers and deletes speakers ([Speakers](../../../pipelines/asr/speakers-and-diarization.md#speakers)) |
+| **Store Audio** | ASR | `-s` | off | see [Run ASR](../../../pipelines/asr/run.md#every-session) |
+| **VAD**, **Noise Reduce**, **Transcribe** | ASR | `-vad`, `-nr`, `-tr` | on | see [Run ASR](../../../pipelines/asr/run.md#every-session) |
+| **Speech Separate**, **Dominant Speaker** | ASR | `-sp`, `-d` | off | see [Run ASR](../../../pipelines/asr/run.md#every-session) |
+| **Half-Scaled Recognition** | ASR | `-hsr` | on | see [Run ASR](../../../pipelines/asr/run.md#every-session) |
+| **Graphics** | IPS, VFA | `-g` | `off for streams` | a window on the base's frames ([IPS](../../../pipelines/ips/run.md#every-session), [VFA](../../../pipelines/vfa/run.md#every-session)) |
 | **Store Frames** | IPS, VFA | `-s` | off | keep the frames |
 | **Verbose** | IPS, VFA | `-v` | on | print debug output |
-| **Action Labels**, **Pose**, **Gaze** | VFA | `-a`, `-pose`, `-gaze` | `as the config says` | the outputs to ask for ([Choosing the outputs](../pipelines/vfa/run.md#choosing-the-outputs)) |
+| **Action Labels**, **Pose**, **Gaze** | VFA | `-a`, `-pose`, `-gaze` | `as the config says` | the outputs to ask for ([Choosing the outputs](../../../pipelines/vfa/run.md#choosing-the-outputs)) |
 
 The dropdowns follow a **Save** on the Config tab and a change of host. **Refresh** reads the config and the matrix files again.
 
 ??? info "Details: what Start refuses on the Launch tab"
     - Two bases on one `Bases` entry. With one entry listed, a base given no `-b` takes it, so a base on `ask in its window` next to a base on the only entry counts as two.
     - A card that starts more bases than **Sync Waits For**. It warns when the config lists more entries, or the synchronizer waits for more bases, than the card starts: those have to run on other hosts, in the same session.
-    - IPS: no Main Camera picked (the log names the folder: make the files with **IPS Transforms**, bring them with **Sync to Host** on the Transform Matrix tab, each base needs its file too, then **Refresh**); bases of two rooms or another room's main camera ([Several rooms](../pipelines/ips/calibration.md#several-rooms)); `· alone, no matrices` beside other bases ([One camera](../pipelines/ips/calibration.md#one-camera)).
+    - IPS: no Main Camera picked (the log names the folder: make the files with **IPS Transforms**, bring them with **Sync to Host** on the Transform Matrix tab, each base needs its file too, then **Refresh**); bases of two rooms or another room's main camera ([Several rooms](../../../pipelines/ips/calibration.md#several-rooms)); `· alone, no matrices` beside other bases ([One camera](../../../pipelines/ips/calibration.md#one-camera)).
     - ASR: one tag on two bases; a base on Speakers in `live` or `analyze` mode with no profiles.
 
 ??? info "Details: Base rows"
@@ -69,7 +69,7 @@ The first Start with `Create MongoDB Session` makes the session id. From then on
 
 ### Start
 
-**Start** runs the [checks before Start](launcher.md#checks-before-start), the stream checks below, and opens one terminal window per base and synchronizer, with the card's choices as flags:
+**Start** runs the [checks before Start](../index.md#checks-before-start), the stream checks below, and opens one terminal window per base and synchronizer, with the card's choices as flags:
 
 ```bash
 mmla ips-base -sid <id> -b 0
@@ -77,7 +77,7 @@ mmla ips-sync -sid <id> -mc 0
 mmla asr-sync -sid <id> --num_bases 2
 ```
 
-A process started this way asks nothing: it waits for its session's START ([Session Control](#session-control)) and exits at the session's STOP or when its run ends. What it writes for its session (its log, the config it ran with, what it recorded) stays on its machine under `artifacts/<session>/pipelines/`; [Sessions → Export](sessions.md#export) brings it here.
+A process started this way asks nothing: it waits for its session's START ([Session Control](#session-control)) and exits at the session's STOP or when its run ends. What it writes for its session (its log, the config it ran with, what it recorded) stays on its machine under `artifacts/<session>/pipelines/`; [Sessions → Export](../../sessions.md#export) brings it here.
 
 ??? info "Details: a process that cannot start"
     A process that cannot start (a matrix file or a `Bases` entry that is not there) says why in its window and falls back to its menu, where it can be put right by hand. Run by hand without `-sid`, the commands ask in their menus.
@@ -87,7 +87,7 @@ A process started this way asks nothing: it waits for its session's START ([Sess
 Before the windows open, Start asks the Stream Server (its control API, `api_port`) whether it receives the streams these bases pull. With every stream live, the log lists them and the bases start. A stream that is not live holds the Start back once, and the log names it, the bases that pull it (`Base 1 · entry 4`) and the machine that captures it.
 
 - Start the stream on the [Streams tab](streams.md) and press **Start** again once it reads `● live`, or
-- press **Start** again at once: each base waits for its stream up to `connect_wait` seconds, 30 by default ([How the bases pull a stream](../streaming/index.md#bases-pulling-a-stream)).
+- press **Start** again at once: each base waits for its stream up to `connect_wait` seconds, 30 by default ([How the bases pull a stream](../../../streaming/index.md#bases-pulling-a-stream)).
 
 ??? info "Details: the stream check"
     - Asked about: the stream of each row's `Bases` entry whose `source` is `stream`, from the config on the card's host (for a remote host, the copy the card last read; Refresh reads it again).
@@ -119,11 +119,11 @@ The **Config** tab edits the pipeline's `config.yml` on the card's host; **Save*
 
 | Field or button | What it does |
 |---|---|
-| System Settings sections | named as in System Settings (`Gateway (Nginx)`, `MQTT (Mosquitto)`), read-only with a `managed in System Settings` note and an **Override here** button ([Connections](system-settings.md#connections)) |
+| System Settings sections | named as in System Settings (`Gateway (Nginx)`, `MQTT (Mosquitto)`), read-only with a `managed in System Settings` note and an **Override here** button ([Connections](../system-settings.md#connections)) |
 | `Server` entries | a bare name (`infer`) goes through the Gateway, shown as `through the Gateway: http://<host>:8080/infer`; a full URL connects directly |
 | **+ Add Stream** | adds a `Streams` entry, on the ASR card with `kind: audio` |
 | stream `kind` | `audio` or `video`, by which the Streams tab captures, records and files the stream; left empty, a sound device (`hw:1,0`, `:0`) or a `udp://` or `tcp://` target is audio, anything else is the card's own kind (audio on ASR, where a Mac's first microphone pushed over RTMP names no device; video on IPS and VFA) |
-| stream `target` | the path alone (`ips/cam-1`); **Save** completes it with the Stream Server of System Settings ([Stream Server form](system-settings.md#stream-server-form)) |
+| stream `target` | the path alone (`ips/cam-1`); **Save** completes it with the Stream Server of System Settings ([Stream Server form](../system-settings.md#stream-server-form)) |
 | **+ Add Base** | ASR: adds a device type under `Base` |
 | `Bases` entries | dropdowns from the config: cameras, base types, sources, the files of a file entry's folder, and for `source: stream` the `Streams` entries by name; only the fields the `source` uses are shown and saved |
 | `source_index` | a dropdown of the devices the host has, once it answers; **Browse…** writes a file's full path |
@@ -143,11 +143,11 @@ A stream's machine and device are picked on the Streams tab, not here, and a Sav
 
 ### Transform Matrix tab
 
-The IPS Base card's **Transform Matrix** tab lists the `transformation_matrices*.json` files camera sync writes, each with whose coordinates it holds (`transformation_matrices_<id>.json · main of room <room>`; the plain `transformation_matrices.json` holds the pairs of every room). The files are edited as JSON. The steps that copy them to the base stations are in [Distribute the matrices](../pipelines/ips/calibration.md#distribute-the-matrices).
+The IPS Base card's **Transform Matrix** tab lists the `transformation_matrices*.json` files camera sync writes, each with whose coordinates it holds (`transformation_matrices_<id>.json · main of room <room>`; the plain `transformation_matrices.json` holds the pairs of every room). The files are edited as JSON. The steps that copy them to the base stations are in [Distribute the matrices](../../../pipelines/ips/calibration.md#distribute-the-matrices).
 
 | Button | What it does |
 |---|---|
-| **Sync to Host** | copies the files of the host on screen into `pipelines/ips-base/camera_sync/` of another machine ([What each sync moves](launcher.md#what-each-sync-moves)) |
+| **Sync to Host** | copies the files of the host on screen into `pipelines/ips-base/camera_sync/` of another machine ([What each sync moves](../index.md#what-each-sync-moves)) |
 | **Sync from Host** | brings another machine's files onto the host on screen; the tab and that host's Main Camera choices follow |
 | **Delete** | removes the file on screen from the host the tab edits, after a second press; other hosts keep their copy |
 
@@ -158,7 +158,7 @@ The IPS Base card's **Transform Matrix** tab lists the `transformation_matrices*
 
 **ASR Server** and **VFA Server** run the AI services with Docker Compose on the selected host, from `docker/docker-compose.asr.yml` and `docker/docker-compose.vfa.yml`.
 
-![ASR Server card, Launch tab: the Services to launch, each with its true or false toggle, above Start, Stop, Logs and Refresh](../img/tui/asr-server.png)
+![ASR Server card, Launch tab: the Services to launch, each with its true or false toggle, above Start, Stop, Logs and Refresh](../../../img/tui/asr-server.png)
 
 | Control | What it does |
 |---|---|
@@ -166,7 +166,7 @@ The IPS Base card's **Transform Matrix** tab lists the `transformation_matrices*
 | **Start** | `docker compose up -d --build` for the selected services |
 | **Stop** | `docker compose down` |
 | **Logs** | tails the containers |
-| **Config** tab | the server's `config.yml`; on the VFA Server with the `features` block of the [features endpoint](../pipelines/vfa/pose-and-gaze.md#features-endpoint) |
+| **Config** tab | the server's `config.yml`; on the VFA Server with the `features` block of the [features endpoint](../../../pipelines/vfa/pose-and-gaze.md#features-endpoint) |
 | **Prompts** tab (VFA) | the templates under `pipelines/vfa-server/prompts/` of the selected host, with Sync to Host and Sync from Host |
 | **Action Schema** tab (VFA) | `config/vfa/action_schemas.yml` of the selected host, with Sync to Host and Sync from Host |
 
@@ -175,11 +175,11 @@ The IPS Base card's **Transform Matrix** tab lists the `transformation_matrices*
 
 ## MLLM Server
 
-The **MLLM Server** card starts `vllm serve` from `config/mllm_server.yml` in the `vfa-vllm` environment, inside a tmux session named `mllm-server`, for VFA setups with a local vision-language model ([Local VLM with the MLLM Server](../pipelines/vfa/action-labels.md#local-vlm-with-the-mllm-server)). Its Config tab edits this machine's `config/mllm_server.yml` whatever the Host selector says; **Sync to Host** and **Sync from Host** carry it.
+The **MLLM Server** card starts `vllm serve` from `config/mllm_server.yml` in the `vfa-vllm` environment, inside a tmux session named `mllm-server`, for VFA setups with a local vision-language model ([Local VLM with the MLLM Server](../../../pipelines/vfa/action-labels.md#local-vlm-with-the-mllm-server)). Its Config tab edits this machine's `config/mllm_server.yml` whatever the Host selector says; **Sync to Host** and **Sync from Host** carry it.
 
 ## IPS calibration { #ips-calibration }
 
-The steps that use these cards are in [Calibrate the cameras](../pipelines/ips/calibration.md).
+The steps that use these cards are in [Calibrate the cameras](../../../pipelines/ips/calibration.md).
 
 | Card | Fields | Default | Runs |
 |---|---|---|---|
@@ -204,7 +204,7 @@ When **Sync from Host** would replace parameters this machine already has for a 
 
 Bases and synchronizers wait after start-up for a START for their session. **Session Control** sends START and STOP over Redis.
 
-![Session Control: the session list with its refresh button, the ASR, IPS and VFA checkboxes, the Redis and MongoDB addresses, and the Send START and Send STOP buttons](../img/tui/session-control.png)
+![Session Control: the session list with its refresh button, the ASR, IPS and VFA checkboxes, the Redis and MongoDB addresses, and the Send START and Send STOP buttons](../../../img/tui/session-control.png)
 
 | Control | What it does |
 |---|---|
@@ -213,7 +213,7 @@ Bases and synchronizers wait after start-up for a START for their session. **Ses
 | **Send START** | starts the session's runs |
 | **Send STOP** | ends them, and marks the session ended in MongoDB; every base and synchronizer the Launcher started for it exits, and the bases note when they left |
 
-The Redis and MongoDB addresses come from System Settings and are shown on the panel. The signal goes from this machine to that Redis, and every base subscribed to it hears it, whichever machine it runs on. The [Quickstart](../quickstart.md#run-a-session) walks through a session.
+The Redis and MongoDB addresses come from System Settings and are shown on the panel. The signal goes from this machine to that Redis, and every base subscribed to it hears it, whichever machine it runs on. The [Quickstart](../../../quickstart.md#run-a-session) walks through a session.
 
 !!! warning "All machines of a session need one Redis"
     With `Redis.host` at `localhost`, only bases on this machine hear the signal; the panel warns about it. For a session across machines, put the Redis machine's host name under `System Settings → Connections → Redis`.
@@ -221,4 +221,8 @@ The Redis and MongoDB addresses come from System Settings and are shown on the p
 ??? info "Details: Session Control without an address"
     - While Redis has no host on this machine (no `config/system_services.yml`, no Redis section, or `<uber-server>` still there), the panel says so and sends neither START nor STOP.
     - While MongoDB has none, STOP still goes out but cannot mark the session ended, and says so.
-    - A session that was never ended is taken to end when its last base left ([End Session](sessions.md#end-session)).
+    - A session that was never ended is taken to end when its last base left ([End Session](../../sessions.md#end-session)).
+
+## Pages in this section
+
+- [Streams tab](streams.md): start, stop and record the streams of a pipeline.

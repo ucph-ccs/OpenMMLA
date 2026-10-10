@@ -48,7 +48,7 @@ The recording does not depend on the network or the server: it goes on in one fi
 
 ### Manage the recordings
 
-**Manage**, in the **Recordings** row of the Streams tab, lists what the card's streams recorded on each capture host: newest day first, with each file's size, the room left on the host's disk, and the file a stream is writing now. The Stream Server card's **Streams** tab has one over the streams of every pipeline ([Stream Server Streams tab](../tui/system-services.md#stream-server-streams-tab)). Manage copies nothing to this machine; a session's part comes with **Sessions → Export** ([Export a session's part](#a-sessions-part-sessions-export)).
+**Manage**, in the **Recordings** row of the Streams tab, lists what the card's streams recorded on each capture host: newest day first, with each file's size, the room left on the host's disk, and the file a stream is writing now. The Stream Server card's **Streams** tab has one over the streams of every pipeline ([Stream Server Streams tab](../tui/launcher/system-services.md#stream-server-streams-tab)). Manage copies nothing to this machine; a session's part comes with **Sessions → Export** ([Export a session's part](#a-sessions-part-sessions-export)).
 
 | Control | What it deletes on the capture hosts |
 |---|---|
@@ -84,7 +84,7 @@ The status line after a signal names the paths, and says in yellow what could no
 
 A segment is deleted `recordDeleteAfter` after it began, by MediaMTX itself: three days in the shipped file, set by **Keep recordings for** on the card's **Config** tab (`0s` keeps everything). Export a session's footage before then; the **Sessions** table says until when, in its **Recordings until** column.
 
-With **Server-side recording** on `every path` (the card's **Config** tab, `pathDefaults.record: yes`), the server records every published path, sessions or not. The card's **Recordings** tab shows what the server holds, path by path, and deletes a path or every segment older than an age ([Stream Server Recordings tab](../tui/system-services.md#stream-server-recordings-tab)).
+With **Server-side recording** on `every path` (the card's **Config** tab, `pathDefaults.record: yes`), the server records every published path, sessions or not. The card's **Recordings** tab shows what the server holds, path by path, and deletes a path or every segment older than an age ([Stream Server Recordings tab](../tui/launcher/system-services.md#stream-server-recordings-tab)).
 
 Segment names are the server's clock, or the publisher's for a path with `useAbsoluteTimestamp` on ([Timestamps](index.md#timestamps)). Treat them as an archive of what arrived rather than as a capture-side recording.
 

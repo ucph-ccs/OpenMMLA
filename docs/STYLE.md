@@ -13,6 +13,8 @@ How the pages under `docs/` are written. The site should read like the docs of c
 ### Guides of several pages
 
 - A guide of several pages is a folder whose overview is `index.md`, served at the URL the single page had (`docs/tui/index.md` at `/tui/`). The overview ends with **Pages in this guide**, a list of its pages with one line each.
+- A page of a guide that has pages of its own is a folder in the same way, so the folders follow the `nav` of `mkdocs.yml`: the Launcher tab is `docs/tui/launcher/index.md`, and Collection and Pipelines are folders inside it. Such a page ends with **Pages in this section**, and the guide's overview lists those pages indented under it.
+- A page that moves to another folder keeps its old URL working with a line under `redirects` in `mkdocs.yml`.
 - A pipeline guide (`docs/pipelines/<name>/`) has the same pages as the VFA one:
     - `index.md`: **What <name> produces** (a short table), **How it works**, **Components**, **What you need**, **Pages in this guide**.
     - `run.md`: a `!!! note "Before you start"` that links to the Quickstart's one-time setup, then **Once per deployment**, **Every session**, **Run from the command line**, **Replay recordings** (anchor `#post-time-processing`) and **Troubleshooting**.

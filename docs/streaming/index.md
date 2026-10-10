@@ -61,7 +61,7 @@ The Docker service's host ports follow the `MEDIAMTX_*_PORT` variables of `docke
 
 ### Server settings { #configuration }
 
-Edit `mediamtx.yml` on the Stream Server card's **Config** tab ([Stream Server Config tab](../tui/system-services.md#stream-server-config-tab)). A key not in the file keeps the MediaMTX default.
+Edit `mediamtx.yml` on the Stream Server card's **Config** tab ([Stream Server Config tab](../tui/launcher/system-services.md#stream-server-config-tab)). A key not in the file keeps the MediaMTX default.
 
 | Key | Shipped | What it does |
 |---|---|---|
@@ -103,7 +103,7 @@ In `target`, type the path alone, such as `ips/cam-1`. **Save** completes it to 
     - While the Stream Server is `localhost`, a path is not completed for a stream captured on another machine, which would publish to itself: name the server under System Settings first.
     - While the form still reads `<uber-server>`, no path is completed, and **Save** says why.
     - When the Stream Server is saved with another host or port, the stream URLs that named the old address follow it in the pipeline configs of the host it is saved on; URLs that point elsewhere are left alone.
-    - **Sync to Host** on the pipeline's **Config** tab takes the changed config to another host, and **Sync from Host** on that host's card fetches it. The two buttons of the Stream Server form carry the address and merge the `Streams` entries by name ([Stream Server form](../tui/system-settings.md#stream-server-form)).
+    - **Sync to Host** on the pipeline's **Config** tab takes the changed config to another host, and **Sync from Host** on that host's card fetches it. The two buttons of the Stream Server form carry the address and merge the `Streams` entries by name ([Stream Server form](../tui/launcher/system-settings.md#stream-server-form)).
 
 ### Stream keys
 
@@ -124,15 +124,15 @@ In `target`, type the path alone, such as `ips/cam-1`. **Save** completes it to 
 | `record_root` | `~/artifacts` on a remote host, `artifacts/` of the project for `local` | where the capture host records |
 | `record_keep_days` | `0` | days the capture host keeps the recordings; `0` keeps them until you delete them |
 
-A running stream keeps its machine until it is stopped, and takes a new device, `record` or `rotate` at its next **Start**. A stream's name is one capture across every pipeline: entries of several cards that share a camera share its name, and two captures under one name are a clash ([Stream names](../tui/streams.md#stream-names)).
+A running stream keeps its machine until it is stopped, and takes a new device, `record` or `rotate` at its next **Start**. A stream's name is one capture across every pipeline: entries of several cards that share a camera share its name, and two captures under one name are a clash ([Stream names](../tui/launcher/pipelines/streams.md#stream-names)).
 
 ??? info "Details: turning the picture and holding the frame rate"
-    - **`rotate`**: FFmpeg turns the picture once, on the capture host, so the bases, both recordings and the dashboard get it upright. The session notes the turn as `sources[].capture.rotate`, and the bases turn their camera's intrinsics with it. A running stream started with another turn shows both in its **Rotate** cell ([Turning the picture](../tui/streams.md#turning-the-picture)).
-    - **`steady_fps`**: with aperture-priority auto exposure, the default of webcams such as the Logitech C920, a camera may lengthen the exposure past a frame in a dim room and deliver 15 fps for the 30 asked. **Start** runs `v4l2-ctl -c exposure_dynamic_framerate=0` on the camera before FFmpeg (`exposure_auto_priority=0` on older kernels), so it keeps its frame rate with a darker picture. The camera keeps the setting until it is unplugged ([Steady frame rate](../tui/streams.md#steady-frame-rate)).
+    - **`rotate`**: FFmpeg turns the picture once, on the capture host, so the bases, both recordings and the dashboard get it upright. The session notes the turn as `sources[].capture.rotate`, and the bases turn their camera's intrinsics with it. A running stream started with another turn shows both in its **Rotate** cell ([Turning the picture](../tui/launcher/pipelines/streams.md#turning-the-picture)).
+    - **`steady_fps`**: with aperture-priority auto exposure, the default of webcams such as the Logitech C920, a camera may lengthen the exposure past a frame in a dim room and deliver 15 fps for the 30 asked. **Start** runs `v4l2-ctl -c exposure_dynamic_framerate=0` on the camera before FFmpeg (`exposure_auto_priority=0` on older kernels), so it keeps its frame rate with a darker picture. The camera keeps the setting until it is unplugged ([Steady frame rate](../tui/launcher/pipelines/streams.md#steady-frame-rate)).
 
 ## Start and stop streams
 
-Before the bases start, on the **Streams** tab of a pipeline card ([Streams tab](../tui/streams.md)):
+Before the bases start, on the **Streams** tab of a pipeline card ([Streams tab](../tui/launcher/pipelines/streams.md)):
 
 ![Streams tab of the IPS Base card: one row per stream with its SSH Profile, Device, Target, Record, Rotate, Status and Stream Server columns, the Manage button for recordings, and Start, Stop, Logs, Probe, Start All, Stop All and Refresh](../img/tui/streams.png)
 
@@ -141,7 +141,7 @@ Before the bases start, on the **Streams** tab of a pipeline card ([Streams tab]
 3. **Wait for `● live`** in the **Stream Server** column (`-` for a stream that goes elsewhere, `no answer` when the server does not answer), then start the bases. **Probe** decodes two seconds of the URL the bases pull.
 4. **Stop** the row, or **Stop All**, once no session pulls the stream. **Stop** waits for FFmpeg to finish a recording and names the file.
 
-A managed stream publishes until it is stopped, whichever card started it; the Stream Server card's **Streams** tab lists and stops the streams of every pipeline ([Stream Server Streams tab](../tui/system-services.md#stream-server-streams-tab)).
+A managed stream publishes until it is stopped, whichever card started it; the Stream Server card's **Streams** tab lists and stops the streams of every pipeline ([Stream Server Streams tab](../tui/launcher/system-services.md#stream-server-streams-tab)).
 
 A push the Stream Server drops does not end FFmpeg: it opens the push again every five seconds until the server takes it, so a stream comes back within seconds of the server being reachable, with nobody at the console.
 
@@ -154,7 +154,7 @@ A push the Stream Server drops does not end FFmpeg: it opens the push again ever
 
 ### Capture on a Mac
 
-A Mac captures through AVFoundation: `device` is a camera's index or name (`0`, the default, or `FaceTime HD Camera`), and a microphone is `:0`. As macOS lets nothing started over SSH use the camera or the microphone, the Streams tab starts FFmpeg from a Terminal window on the Mac's screen, which closes by itself once FFmpeg runs. That needs someone logged in on the Mac, with Terminal allowed under **System Settings → Privacy & Security → Camera** and **Microphone** ([Recording on a Mac](../tui/collection.md#recording-on-a-mac)).
+A Mac captures through AVFoundation: `device` is a camera's index or name (`0`, the default, or `FaceTime HD Camera`), and a microphone is `:0`. As macOS lets nothing started over SSH use the camera or the microphone, the Streams tab starts FFmpeg from a Terminal window on the Mac's screen, which closes by itself once FFmpeg runs. That needs someone logged in on the Mac, with Terminal allowed under **System Settings → Privacy & Security → Camera** and **Microphone** ([Recording on a Mac](../tui/launcher/collection/index.md#recording-on-a-mac)).
 
 ??? info "Details: the Mac's FFmpeg"
     FFmpeg goes on in a session of its own, so no window closed by hand can stop a stream; the tmux session follows its output and passes **Stop** on to it. A stream `local` to a Mac runs directly, as the console already runs in the Mac's desktop session, unless the console itself was reached over SSH.
@@ -247,7 +247,7 @@ The base waits for a stream that is not up yet, and opens one that drops again, 
     - A stream drops when its publisher went away and MediaMTX ended the readers of its path, or when nothing came for 10 s. The base keeps its session and goes on with what comes after the gap; the gap has no frames or audio, and none is made up. The log says when the stream dropped and when it came back, and, when the base stops, how many drops there were.
     - A stream that does not come back within `reconnect_wait` ends the run as an error: an IPS or VFA base exits, and an ASR base says its run did not end with STOP and shows its menu.
     - A camera index, a file or a microphone on the base's own machine is not waited for: the base fails at once when it is not there. An LSL stream is waited for like a network stream.
-    - A base card's **Start** asks the Stream Server which of its bases' streams are live, and holds back once, naming those that are not ([Stream check](../tui/pipelines.md#stream-check)).
+    - A base card's **Start** asks the Stream Server which of its bases' streams are live, and holds back once, naming those that are not ([Stream check](../tui/launcher/pipelines/index.md#stream-check)).
 
 ## Timestamps
 

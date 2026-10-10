@@ -116,7 +116,7 @@ A capture device that only streams or records needs no env: an SSH profile, a us
 ??? info "Details: FFmpeg on a Pi, and Macs that record"
     - **Start** on a Streams tab installs FFmpeg and tmux on the device when they are missing.
     - The Collection card copies its recorder code to the device but installs nothing. On a Pi that only records for it, run `sudo apt-get install -y ffmpeg` in a shell on the Pi.
-    - A Mac that records its own camera or microphone needs someone logged in on its screen, with Terminal allowed under **Privacy & Security → Camera** and **Microphone** ([Recording on a Mac](tui/collection.md#recording-on-a-mac)).
+    - A Mac that records its own camera or microphone needs someone logged in on its screen, with Terminal allowed under **Privacy & Security → Camera** and **Microphone** ([Recording on a Mac](tui/launcher/collection/index.md#recording-on-a-mac)).
 
 ### Point everything at the system services
 
@@ -250,7 +250,7 @@ The **Experiment Group** dropdown of the Collection and base cards now lists `<e
 
 ## Collection mode
 
-The Collection card registers each session in MongoDB, in an experiment group from [Describe the study](#describe-the-study). [Collection](tui/collection.md) lists every field.
+The Collection card registers each session in MongoDB, in an experiment group from [Describe the study](#describe-the-study). [Collection](tui/launcher/collection/index.md) lists every field.
 
 ### Plan the recorders
 
@@ -299,7 +299,7 @@ The Collection card registers each session in MongoDB, in an experiment group fr
 The recordings of a remote machine stay on it until they are fetched. For a finished session, **Sessions → Export** fetches them with the rest of the session: see [Export and archive](#export-and-archive).
 
 ??? info "Details: Download and Delete Remote on the card"
-    - **Download** copies the recordings of every remote machine of the card into this console's `artifacts/<session>/collection/<host>/`. It resumes where it stopped, shows a progress bar with **Cancel** under the log, and a second press fetches only what is new ([Download a session](tui/collection.md#downloading-a-session)).
+    - **Download** copies the recordings of every remote machine of the card into this console's `artifacts/<session>/collection/<host>/`. It resumes where it stopped, shows a progress bar with **Cancel** under the log, and a second press fetches only what is new ([Download a session](tui/launcher/collection/index.md#downloading-a-session)).
     - A session that is still recording downloads as far as it has been written, and the files still growing stay staged: stop the recorders, then download again.
     - Once the recordings are here and archived, **Delete Remote** removes them from the card's remote machines. The first press names each machine and the session; the second deletes.
 
@@ -430,6 +430,6 @@ The archived recordings are what the dashboard's Analysis page lists for downloa
 ??? info "Details: what a pull leaves behind"
     - A running console, and a running dashboard, keep the code they started with.
     - **Git Pull All** skips offline machines, and its last line says which machines pulled, were up to date or failed.
-    - A machine where a **Sync to Host** changed a file that git tracks (a prompt, a task, `mediamtx.yml`) stops on that file when the pull changes it, until the change is committed or undone there ([Sync safety](tui/launcher.md#sync-safety)).
+    - A machine where a **Sync to Host** changed a file that git tracks (a prompt, a task, `mediamtx.yml`) stops on that file when the pull changes it, until the change is committed or undone there ([Sync safety](tui/launcher/index.md#sync-safety)).
     - An env that lacks a package reads `Partial: ...`, and its `[E]` marker in the Launcher turns yellow.
     - A Stream Server in Docker reads `mediamtx.yml` only when its container starts, and the restart closes every stream for a moment.

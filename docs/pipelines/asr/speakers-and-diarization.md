@@ -201,7 +201,7 @@ At most one microphone leads at a moment. When the same word is on two microphon
 
 ### Binding tags
 
-Every audio recording of a session's manifests has a `scope` (`personal` or `group`) and a `participant`. A live Collection recording notes the wearer picked under the Collection form's **Participant**, else its device's default scope. What it left unbound is bound afterwards with `mmla ses-tidy --scope`, `--participant` and `--participants-in-order` ([Microphone scope and wearers](../../tui/session-tools.md#microphone-scope-and-wearers)).
+Every audio recording of a session's manifests has a `scope` (`personal` or `group`) and a `participant`. A live Collection recording notes the wearer picked under the Collection form's **Participant**, else its device's default scope. What it left unbound is bound afterwards with `mmla ses-tidy --scope`, `--participant` and `--participants-in-order` ([Microphone scope and wearers](../../tui/launcher/collection/session-tools.md#microphone-scope-and-wearers)).
 
 ## Troubleshooting
 

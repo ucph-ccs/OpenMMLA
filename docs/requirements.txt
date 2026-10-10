@@ -1,3 +1,5 @@
 # dependencies for building the documentation site (mkdocs.yml / .readthedocs.yaml)
 mkdocs-material>=9.5,<10
 mkdocs-include-markdown-plugin>=6,<8
+# 1.2.3 depends on properdocs, which prints a migration banner into every mkdocs build
+mkdocs-redirects>=1.2,<1.2.3

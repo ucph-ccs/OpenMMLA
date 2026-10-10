@@ -67,7 +67,7 @@ These steps are done once, and again only when something they set changes: a mic
 
     ??? info "Details: what Start checks"
         - On a remote host whose config lacks the current System Settings, the first Start only brings them there and says `Relaunch ASR Base once the sync above completes.` Press **Start** again.
-        - Start asks the Stream Server whether the streams the bases pull are live, and holds back once when it receives nothing on one ([Stream check](../../tui/pipelines.md#stream-check)). Start the stream, or press **Start** again to start the bases anyway.
+        - Start asks the Stream Server whether the streams the bases pull are live, and holds back once when it receives nothing on one ([Stream check](../../tui/launcher/pipelines/index.md#stream-check)). Start the stream, or press **Start** again to start the bases anyway.
         - Start refuses, and the log says why, when two bases are on one `Bases` entry, the card starts more bases than the synchronizer waits for, one tag is picked on two bases, or a Speakers base in `live` or `analyze` mode would have no speakers: no profile registered on the host, none ticked for it, or none of those ticked registered there.
         - Start warns, and starts anyway, when the **Streams** tab runs a stream these bases pull, or a microphone that pushes to a `udp` or `tcp` base, on another machine or records it otherwise than the config of the card's host says. The bases read that config, and the session notes what it says: a microphone that records on its Pi while the config says `record: false` is noted as not recorded, and one captured on another Pi than its `ssh_profile` sends **Sessions → Export** to the wrong Pi.
         - Start passes each base its own speakers as `-spk Alice,Bob`, and none to the synchronizer. A base already running keeps the profiles it started with.
@@ -154,7 +154,7 @@ The modules are `serve_audio_inferer` (5001), `serve_audio_resampler` (5002), `s
 
 A recorded session is analyzed by replaying its audio files through the bases (post-time processing).
 
-1. Record with **Collection → Collection Session** ([Record a session](../../tui/collection.md#record-a-session)).
+1. Record with **Collection → Collection Session** ([Record a session](../../tui/launcher/collection/index.md#record-a-session)).
 2. On the ASR Base card's **Config** tab, set each base's `source` to `file` and its `source_index` to its file in the `audio/` directory of the collection manifest, by its full path (**Browse…** picks it).
 3. Run the session in `live` mode as in [Every session](#every-session), without the streams. The Quickstart's [Analyze the recordings later](../../quickstart.md#analyze-the-recordings-later) gives the steps for all pipelines at once.
 

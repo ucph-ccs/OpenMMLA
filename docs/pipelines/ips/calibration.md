@@ -15,7 +15,7 @@ A session of one camera needs only the intrinsics ([One camera](#one-camera)). A
 4. **Calibrate** (`2`). Pick the camera's folder and say whether its lens is a fisheye. A window shows the corners found on each image; press a key for the next. The calibrator then writes the camera's entry into `Cameras` of the IPS Base config on its machine ([Cameras](configuration.md#cameras)).
 5. **Give the intrinsics to the base stations.** On the **Calibration Cameras** panel below the card, with the card's **Host** on `Local`, pick the camera and the base station, and press **Sync to Host**. The base station needs its IPS Base config first.
 
-Cameras of the same model can share one entry. The **Calibration Cameras** panel copies the entries between machines, never the images; its controls are listed under [IPS calibration](../../tui/pipelines.md#ips-calibration).
+Cameras of the same model can share one entry. The **Calibration Cameras** panel copies the entries between machines, never the images; its controls are listed under [IPS calibration](../../tui/launcher/pipelines/index.md#ips-calibration).
 
 ??? info "Details: turned streams, image sizes and shipped images"
     - A `Cameras` entry holds the intrinsics of the picture as the sensor gives it. Calibrating from a stream whose `Streams` entry has a `rotate`, the calibrator lists the stream with its turn and turns each image back before it saves it. The live view shows the stream as it comes, turned.
@@ -59,7 +59,7 @@ Every base station that runs an IPS base or the synchronizer needs the exported 
 2. Pick a base station beside **Sync to Host** and press it. The files are copied into `pipelines/ips-base/camera_sync/` there.
 3. Repeat for every base station.
 
-**Sync from Host** copies the files the other way, and **Delete** removes the file on screen ([Transform Matrix tab](../../tui/pipelines.md#transform-matrix-tab)).
+**Sync from Host** copies the files the other way, and **Delete** removes the file on screen ([Transform Matrix tab](../../tui/launcher/pipelines/index.md#transform-matrix-tab)).
 
 ## One camera
 

@@ -68,7 +68,7 @@ These steps are done once, and again only when something they set changes: a mod
 
 3. **Press Start.** It opens one terminal window per base and synchronizer, and nothing in them asks anything, unless a base is left on `ask in its window`. Each base runs as its `Bases` entry; the synchronizer starts on the session at once and waits for START.
     - On a remote host whose config lacks the current System Settings, the first Start only brings them there and says `Relaunch VFA Base once the sync above completes.` Press **Start** again.
-    - Start asks the Stream Server whether the streams the bases pull are live, and holds back once, naming those that are not ([Stream check](../../tui/pipelines.md#stream-check)). Start them on the **Streams** tab, or press **Start** again to start the bases anyway.
+    - Start asks the Stream Server whether the streams the bases pull are live, and holds back once, naming those that are not ([Stream check](../../tui/launcher/pipelines/index.md#stream-check)). Start them on the **Streams** tab, or press **Start** again to start the bases anyway.
 
     ??? info "Details: what else Start checks"
         - Start warns, and starts anyway, when a stream the **Streams** tab runs is captured on another machine, recorded or turned otherwise than the config of the card's host says. The bases read that config, and the session notes what it says.

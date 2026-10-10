@@ -16,9 +16,9 @@ What to do when a stream does not start, does not reach the bases, drops, or is 
 
 **A Mac's stream never starts** (`Could not open a Terminal window`, or `did not start ffmpeg`). Nobody is logged in on the Mac's screen, which is where macOS lets FFmpeg use the camera ([Capture on a Mac](index.md#capture-on-a-mac)).
 
-**A row reads `Name clash` or `Name in use`.** Entries of two pipelines give one name to two different captures ([Stream names](../tui/streams.md#stream-names)). Rename one of them on its card's **Config** tab; its target can stay.
+**A row reads `Name clash` or `Name in use`.** Entries of two pipelines give one name to two different captures ([Stream names](../tui/launcher/pipelines/streams.md#stream-names)). Rename one of them on its card's **Config** tab; its target can stay.
 
-**The Rotate cell reads `180° (runs 0°)` in yellow.** The config was given another turn after the stream started. Stop and start the stream before the bases, which read the config's turn ([Turning the picture](../tui/streams.md#turning-the-picture)).
+**The Rotate cell reads `180° (runs 0°)` in yellow.** The config was given another turn after the stream started. Stop and start the stream before the bases, which read the config's turn ([Turning the picture](../tui/launcher/pipelines/streams.md#turning-the-picture)).
 
 **`Running`, but the Stream Server column reads `○ not live`.** Nothing arrives. The push cannot reach the server and keeps trying: **Logs** shows what FFmpeg says, and a Mac may be asking on its screen whether Terminal may use the camera. **Probe** decodes two seconds of the read URL with FFmpeg on this machine; its error text is the server's answer, and `404 Not Found` means nobody publishes that path.
 

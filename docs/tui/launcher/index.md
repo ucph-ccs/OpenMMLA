@@ -2,7 +2,7 @@
 
 The Launcher tab configures and starts every OpenMMLA component. Its sidebar is a tree of System Settings, system services, Collection and pipelines; selecting a leaf shows its form or card on the right.
 
-![Launcher tab: the sidebar tree with System Settings, System Services, Collection and Pipelines, and the InfluxDB card on the right with its status, Run mode, Start, Stop, Logs, Refresh and Fetch Token](../img/tui/launcher.png)
+![Launcher tab: the sidebar tree with System Settings, System Services, Collection and Pipelines, and the InfluxDB card on the right with its status, Run mode, Start, Stop, Logs, Refresh and Fetch Token](../../img/tui/launcher.png)
 
 ## The tree
 
@@ -27,7 +27,7 @@ OpenMMLA
     └── Session Control
 ```
 
-Each branch has its page: [System Settings](system-settings.md), [System Services](system-services.md), [Collection](collection.md), and [Pipelines](pipelines.md) with the [Streams tab](streams.md).
+Each branch has its page: [System Settings](system-settings.md), [System Services](system-services.md), [Collection](collection/index.md) with [Bringing recordings in](collection/session-tools.md), and [Pipelines](pipelines/index.md) with the [Streams tab](pipelines/streams.md).
 
 A system service has one name everywhere the console shows it: `Role (Product)`, where the role is the **Connections** form that holds its address. `Gateway (Nginx)` and `Stream Server (MediaMTX)` each have a form, since the load balancer and the Stream Server need not share a machine. `Dashboard (Flask)` and its worker `Dashboard (Celery)` take their host from `Dashboard (Flask)`, and the broker behind the `MQTT` section is `MQTT (Mosquitto)`.
 
@@ -52,7 +52,7 @@ A leaf that launches something carries markers, explained by the legend above th
 
 Every launchable leaf opens a card with the service name, its conda env and launch type, a status line, its parameters, and **Start**, **Stop**, **Logs** and **Refresh**. A pipeline card also has a **Config** tab that edits `pipelines/<pipeline>/config.yml` on the selected host; **Save** writes it there.
 
-Bases and camera tools open in terminal windows: their cards read `Interactive (runs in its own terminal)` and have no Stop. A base exits by itself at its session's STOP ([Start](pipelines.md#start)), and a camera tool is closed from its own window.
+Bases and camera tools open in terminal windows: their cards read `Interactive (runs in its own terminal)` and have no Stop. A base exits by itself at its session's STOP ([Start](pipelines/index.md#start)), and a camera tool is closed from its own window.
 
 The command log at the bottom of the tab is one transcript for every card, since a build or a remote stop keeps printing after you move on. A divider such as `── Stream Server (MediaMTX) · Local ──` comes before the first line of another card or host.
 
@@ -71,7 +71,7 @@ Start checks the target host first and stops with a note when something is missi
 | the System Settings sections of the config are up to date | on a remote host, the first Start only brings the current System Settings there and prints `Relaunch <service> once the sync above completes.`; press **Start** again |
 | every section the config carries has an address | Start is refused on any host: `IPS Base not started: System Settings → Connections → MQTT has no host yet. ...` |
 | the conda environment exists | Start stops |
-| the streams the bases pull are live (base cards) | Start holds back once ([Stream check](pipelines.md#stream-check)) |
+| the streams the bases pull are live (base cards) | Start holds back once ([Stream check](pipelines/index.md#stream-check)) |
 
 ??? info "Details: the Gateway and Dashboard configs"
     The Gateway (Nginx), Dashboard (Flask) and Dashboard (Celery) cards need a `config.yml` too, in `pipelines/uber-server/nginx/` and `pipelines/uber-server/dashboard/flask-backend/`. Like every config it is gitignored, so a freshly pulled host has none, and Start stops with a note. Write it with **Save** on that card's Config tab, or copy this machine's: **Sync from Host** with `Local` picked on that host's Config tab, or **Sync to Host** with Host on `Local`.
@@ -105,7 +105,7 @@ Between two remote hosts the file travels through this machine, the one place bo
 | pipeline **Config** tab | the whole `config.yml` as last saved, its `Bases`, `Streams` and devices included; a Sync from Host replaces the file on screen, and edits not saved there are gone |
 | **MLLM Server** form | the whole `config/mllm_server.yml` |
 | **Prompts**, **Action Schema**, **Transform Matrix**, MediaMTX **Config** | files added or overwritten by name, none deleted; on Prompts and Transform Matrix a Sync from Host first lists the picked host's files, and says when that host could not be asked or has none |
-| **Calibration Cameras** | camera parameters, not files ([IPS calibration](pipelines.md#ips-calibration)) |
+| **Calibration Cameras** | camera parameters, not files ([IPS calibration](pipelines/index.md#ips-calibration)) |
 | **Experiments** | the whole file |
 | **Tasks** | the task files, by name |
 | **SSH Profiles** | the profiles, merged by name |
@@ -123,3 +123,12 @@ A sync never leaves half a file, and encrypts the file's secrets again with the 
 
 !!! note "Synced files that git tracks"
     The prompt templates, `config/vfa/action_schemas.yml`, `config/mllm_server.yml`, `config/tasks/*.yaml` and `pipelines/uber-server/mediamtx/mediamtx.yml` are tracked in git. A synced copy is a local change in that host's checkout, and a **Git Pull** there stops on it when the pull changes the same file, until the change is committed or undone.
+
+## Pages in this section
+
+- [System Settings](system-settings.md): SSH profiles, experiments, tasks, connections, sudo.
+- [System Services](system-services.md): the service cards, and the Stream Server's Streams and Recordings tabs.
+- [Collection](collection/index.md): record raw audio and video, and download it.
+    - [Bringing recordings in](collection/session-tools.md): `mmla ses-import`, `ses-tidy` and `ses-align`.
+- [Pipelines](pipelines/index.md): base cards, server cards, the MLLM Server, IPS calibration, Session Control.
+    - [Streams tab](pipelines/streams.md): start, stop and record the streams of a pipeline.

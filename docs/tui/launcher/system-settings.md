@@ -4,7 +4,7 @@ System Settings holds what the whole deployment shares: the SSH profiles of the 
 
 ## Whose settings a form shows
 
-Every machine's services read that machine's settings: its pipeline `config.yml` files and, on top of them, its `config/system_services.yml` ([Pointing the pipelines at the services](../system_services.md#pointing-the-pipelines-at-the-services)). A console started there reads that machine's SSH profiles, experiments and tasks. So every form but Sudo has a **Host** selector, one shared by the forms, starting on `Local`.
+Every machine's services read that machine's settings: its pipeline `config.yml` files and, on top of them, its `config/system_services.yml` ([Pointing the pipelines at the services](../../system_services.md#pointing-the-pipelines-at-the-services)). A console started there reads that machine's SSH profiles, experiments and tasks. So every form but Sudo has a **Host** selector, one shared by the forms, starting on `Local`.
 
 | Selector | What the forms do |
 |---|---|
@@ -34,7 +34,7 @@ A Start on a remote host first brings its pipeline configs in step: with that ho
 
 One entry per remote machine, in `config/ssh_profiles.yml` (gitignored; `config/ssh_profiles_template.yml` is the tracked example). Passwords are stored encrypted.
 
-![SSH Profiles form under System Settings → Hosts: the saved profiles with Test, Edit and Delete, and below them a profile being edited, with the Save Profile, Test Connection and Clear Form buttons over its Profile Name, Host and User fields](../img/tui/ssh-profiles.png)
+![SSH Profiles form under System Settings → Hosts: the saved profiles with Test, Edit and Delete, and below them a profile being edited, with the Save Profile, Test Connection and Clear Form buttons over its Profile Name, Host and User fields](../../img/tui/ssh-profiles.png)
 
 | Field | Default | What it does |
 |---|---|---|
@@ -76,7 +76,7 @@ A sync asks for a second press first (`Press again to write 3 profile(s) (1 with
 
 The study registry, in `config/experiments.yaml` (gitignored, template `config/experiments_template.yaml`). The active experiments and their groups fill the **Experiment Group** dropdowns of the base and Collection cards, and the participants' descriptions go into the VFA prompts.
 
-![System Settings → Study → Experiments: one experiment with its ID, Title, Task Type and Status, its participants with group and tag, and the Add Participant fields](../img/tui/experiments.png)
+![System Settings → Study → Experiments: one experiment with its ID, Title, Task Type and Status, its participants with group and tag, and the Add Participant fields](../../img/tui/experiments.png)
 
 | Field | What it does |
 |---|---|
@@ -121,9 +121,9 @@ The task definitions in `config/tasks/*.yaml`, tracked in git and edited as raw 
 
 ## Connections
 
-One form per system service address. The fields and defaults are in [Pointing the pipelines at the services](../system_services.md#pointing-the-pipelines-at-the-services).
+One form per system service address. The fields and defaults are in [Pointing the pipelines at the services](../../system_services.md#pointing-the-pipelines-at-the-services).
 
-![System Settings → Connections → InfluxDB form: the url, token, org and bucket fields with Save and Reset to Defaults, and the host picker with Sync to Host and Sync from Host](../img/tui/connections.png)
+![System Settings → Connections → InfluxDB form: the url, token, org and bucket fields with Save and Reset to Defaults, and the host picker with Sync to Host and Sync from Host](../../img/tui/connections.png)
 
 | Form | Section | Host key |
 |---|---|---|
@@ -144,7 +144,7 @@ One form per system service address. The fields and defaults are in [Pointing th
 
 - The pipeline Config tabs show these sections read-only, with a `managed in System Settings` note. A pipeline that must keep its own value lists the section under `SystemServicesOverride:` in its `config.yml`, or you press **Override here** at the bottom of that section on its Config tab.
 - A stored secret, such as the InfluxDB token, shows as `ENC(...)`, encrypted with the master key of the machine the form shows. Type the new value in plain text over it, and Save encrypts it.
-- An address nobody has filled in reads `<uber-server>` ([A new machine](../system_services.md#a-new-machine)). A section with any such value counts as not set as a whole, and the status line names the fields to fill.
+- An address nobody has filled in reads `<uber-server>` ([A new machine](../../system_services.md#a-new-machine)). A section with any such value counts as not set as a whole, and the status line names the fields to fill.
 
 ??? info "Details: what Save writes"
     - In `config/system_services.yml`, the sections already there stay as they are, and no section is added that nobody saved. A section no pipeline config carries (Dashboard) goes into that file alone.
@@ -160,7 +160,7 @@ One form per system service address. The fields and defaults are in [Pointing th
 
 ## Stream Server form
 
-The Stream Server (MediaMTX) form is read by consoles and the dashboard, and no pipeline config carries it. The console places and probes the MediaMTX card with it, and completes a stream written as a path (`ips/cam-1`) into the URLs of its `Streams` entry ([Server settings](../streaming/index.md#configuration)). The [dashboard](../dashboard/live-video-and-sound.md#camera-tiles) reads it on its own machine to ask MediaMTX which streams are live and to tell browsers the WebRTC port; **Sync to Host** gives it the address there.
+The Stream Server (MediaMTX) form is read by consoles and the dashboard, and no pipeline config carries it. The console places and probes the MediaMTX card with it, and completes a stream written as a path (`ips/cam-1`) into the URLs of its `Streams` entry ([Server settings](../../streaming/index.md#configuration)). The [dashboard](../../dashboard/live-video-and-sound.md#camera-tiles) reads it on its own machine to ask MediaMTX which streams are live and to tell browsers the WebRTC port; **Sync to Host** gives it the address there.
 
 ??? info "Details: the Stream Server form"
     - The form follows the Host selector like the others, but this console places, probes and completes with `Local`'s address whatever the form shows. A console on another machine reads that machine's own file.
