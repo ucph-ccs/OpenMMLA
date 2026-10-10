@@ -42,15 +42,16 @@ another folder (e.g. an ablation arm's re-fused tables), never artifacts/<sessio
 a session the run would read from artifacts/ but whose table that folder lacks refuses the run (one
 without the --coder's labels in a session, unit or forward run excepted, which those leave out anyway).
 
--m pmil-lr, -m lr-soft, -m net-attn and -m net-pair-c are exploratory candidates of the architecture panel,
+-m pmil-lr, -m lr-soft, -m net-attn and the -c variants (net-notcn-c, net-c, net-pair-c, net-attn-c) are exploratory
+candidates of the architecture panel,
 named only on purpose (never by -m all) and grouped 'exploratory' in the results:
 pmil-lr, a noisy-OR over the pupil pairs of one shared linear scorer with a bias per group size,
 answers p(interaction) only and needs --target binary; lr-soft is lr fitted on two coders' soft
 labels (a window both gave a class counts half for each label, a window the --coder called unclear or
 absent not at all), the second coder being --soft-coder or else the one human coder besides --coder
 whose labels the training sessions hold; net-attn is self-attention over the persons with the pairs as
-its bias, trained as the networks are; net-pair-c is net-pair with the transcript content block appended
-to the group token. All four are calibrated, smoothed and scored as the model they extend and are
+its bias, trained as the networks are; a -c variant is its base network with the transcript content block
+appended to the group token. All are calibrated, smoothed and scored as the model they extend and are
 candidates of select-all.
 
 --agreement A,B trains nothing: Cohen's kappa and the percent agreement of two coders on the windows
@@ -135,8 +136,8 @@ def get_parser():
                              "pre-declared headline rule over late-lr and late-hgb) and select-all (the lowest inner "
                              "log-loss over the named models), chosen in each fold on the inner out-of-fold answers; "
                              "and the exploratory candidates pmil-lr (pairs, noisy-OR; --target binary only), lr-soft "
-                             "(two coders' soft labels), net-attn (attention over persons) and net-pair-c (net-pair with "
-                             "the content block on the group token), never in all")
+                             "(two coders' soft labels), net-attn (attention over persons) and the -c variants net-notcn-c, "
+                             "net-c, net-pair-c, net-attn-c (the content block on the group token), never in all")
     parser.add_argument('--split', choices=('date', 'task', 'test', 'session', 'unit', 'forward'), default='date',
                         help="date: leave one DEV date out, all its sessions together (default); test: train on "
                              "DEV, score TEST once (needs --confirm-frozen and --coder); session: leave one session "

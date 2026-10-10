@@ -130,7 +130,7 @@ never by -m all, and sit in the results table's group 'exploratory' (EXPLORATORY
 noisy-OR over the pupil pairs with a shared linear scorer and a bias per group size (pmil.py; binary
 target only), lr-soft, lr fitted on two coders' soft labels (the truth coder's and one other's, half
 a window each where both gave a class, none where the truth coder said unclear or absent;
-tabular.fit_soft), net-attn, self-attention over the person slots with the pairs as its bias, and net-pair-c, net-pair with the content block on the group token
+tabular.fit_soft), net-attn, self-attention over the person slots with the pairs as its bias, and the -c variants of the token rungs (net-notcn-c, net-c, net-pair-c, net-attn-c), the same networks with the content block on the group token
 (network.AttentionNet). Each is fitted, calibrated and smoothed as the model it extends, and each is
 a candidate of select-all.
 
@@ -183,7 +183,7 @@ TABULAR = ('r1', 'lr', 'hgb', 'late-lr', 'late-hgb')
 NETWORKS = ('pooled-net', 'net-notcn', 'net', 'net-pair')
 # the exploratory candidates of the architecture panel: named only on purpose, never by -m all
 # (MODELS), and grouped apart in the results table
-EXPLORATORY = ('pmil-lr', 'lr-soft', 'net-attn', 'net-pair-c')
+EXPLORATORY = ('pmil-lr', 'lr-soft', 'net-attn', 'net-notcn-c', 'net-c', 'net-pair-c', 'net-attn-c')
 EXPLORATORY_NOTES = {
     'pmil-lr': "exploratory: noisy-OR over the window's pupil pairs of one shared linear scorer, an instance "
                "being a pair's values and masks with the min and max of its two pupils' (78 columns), one bias per "
@@ -195,12 +195,12 @@ EXPLORATORY_NOTES = {
     'net-attn': "exploratory: self-attention over the person slots with the pairs as an additive bias, "
                 "attention pooling queried by the group token and group size, then the net family's window "
                 "layer, temporal blocks and training",
-    'net-pair-c': "exploratory: net-pair with the transcript content block (its four scores and mask, layout "
-                  "version 5) appended to the group token, so a token rung reads the content the pooled view holds; "
-                  "the same training",
+    **{f'{base}-c': f"exploratory: {base} with the transcript content block (its four scores and mask, layout "
+                   f"version 5) appended to the group token, so the token rung reads the content the pooled view "
+                   f"holds; the same training" for base in ('net-notcn', 'net', 'net-pair', 'net-attn')},
 }
 # every model that trains through network.py
-NEURAL = NETWORKS + ('net-attn', 'net-pair-c')
+NEURAL = NETWORKS + ('net-attn', 'net-notcn-c', 'net-c', 'net-pair-c', 'net-attn-c')
 # the models that answer p(interaction) only
 BINARY_ONLY = ('pmil-lr',)
 # the models that read no label: they run even where a learned model is refused
@@ -279,7 +279,7 @@ SESSION_RUNS = 'session_runs.jsonl'
 TARGETS = ('3class', 'binary')
 # the network reads its sequence through its own temporal blocks, not through lag columns
 NET_TEMPORAL = {'pooled-net': 'tcn', 'net-notcn': 'T0', 'net': 'tcn', 'net-pair': 'tcn', 'net-attn': 'tcn',
-                'net-pair-c': 'tcn'}
+                'net-notcn-c': 'T0', 'net-c': 'tcn', 'net-pair-c': 'tcn', 'net-attn-c': 'tcn'}
 # inputs whose features never read a later window: only these get the forward filter, the online
 # answer, and for it the held-out session is scaled by the running normaliser
 CAUSAL_INPUTS = ('T0', 'T1c', 'j0', 'j1')
@@ -1145,7 +1145,7 @@ def _network(fd: _Fold, plan: dict, model: str, details: dict):
     or with plan['net_oof'] 'common' every split's at the refit's epoch count (network.oof_at)."""
     from openmmla.analytics.interaction import network as N
     pooled_input = model == 'pooled-net'
-    content = model == 'net-pair-c'  # the content block rides on the group token
+    content = model in N.CONTENT_VARIANTS  # the content block rides on the group token
     first = fd.views[fd.train[0].session]
     blocks = LY.block_columns(first, with_group_size=False)
 
@@ -2202,9 +2202,12 @@ def _exploratory_record(models, plan: dict) -> dict:
     if 'net-attn' in models:
         from openmmla.analytics.interaction import network as N
         out['net-attn'] = {'default': dict(N.ATTENTION), 'small': dict(N.ATTENTION_SMALL)}
-    if 'net-pair-c' in models:
-        from openmmla.analytics.interaction import network as N
-        out['net-pair-c'] = {'group_token': list(N.GC_COLUMNS), 'd_g': N.D_G + N.D_C}
+    from openmmla.analytics.interaction import network as N
+    for model in models:
+        if model in N.CONTENT_VARIANTS:
+            out[model] = {'extends': N.CONTENT_VARIANTS[model], 'group_token': list(N.GC_COLUMNS), 'd_g': N.D_G + N.D_C}
+    if 'net-attn-c' in models:
+        out['net-attn-c'].update(default=dict(N.ATTENTION), small=dict(N.ATTENTION_SMALL))
     return out
 
 

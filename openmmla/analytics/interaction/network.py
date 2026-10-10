@@ -18,9 +18,10 @@ None, NaN) none. `session_tensors` turns a session into the dict every other fun
 pooled control (PooledNet) reads the 123-column pooled view instead of the tokens (the only rung
 that sees the transcript content, which no token holds). net-attn
 (AttentionNet, an exploratory candidate of the architecture panel) reads the same tokens
-through self-attention over the persons and trains through the same functions; net-pair-c
-(exploratory too) is net-pair with the transcript content C (T, 5: four scores and m_content)
-appended to the group token (session_tensors' `content`), the one token rung that sees it.
+through self-attention over the persons and trains through the same functions. The -c variants
+(CONTENT_VARIANTS: net-notcn-c, net-c, net-pair-c, net-attn-c) are the same models with the
+transcript content C (T, 5: four scores and m_content) appended to the group token
+(session_tensors' `content`), the token rungs that see the content block.
 
 The training part follows the recipe fixed before any result: tempered class weights,
 cross-entropy with label smoothing on coded windows only (uncoded and unclear windows are context),
@@ -243,7 +244,9 @@ SMALL = {'d_set': 16, 'd_speech': 12, 'd_window': 32}
 SMALL_BELOW = 3000
 VARIANTS = ('pooled-net', 'net-notcn', 'net', 'net-pair')  # ladder rungs a-d; rung e (pretraining) is deferred
 # the exploratory candidates of the architecture panel: no rung of the ladder
-EXPLORATORY = ('net-attn', 'net-pair-c')
+# the token rungs with the content block on the group token: variant -> the model it extends
+CONTENT_VARIANTS = {'net-notcn-c': 'net-notcn', 'net-c': 'net', 'net-pair-c': 'net-pair', 'net-attn-c': 'net-attn'}
+EXPLORATORY = ('net-attn',) + tuple(CONTENT_VARIANTS)
 # net-attn's two configurations, taken by the rungs' rule (use_small)
 ATTENTION = {'d_person': 24, 'heads': 2, 'd_speech': 16, 'd_window': 48}
 ATTENTION_SMALL = {'d_person': 16, 'heads': 2, 'd_speech': 12, 'd_window': 32}
@@ -299,18 +302,17 @@ def layout_of(batch, layout=None):
 def make_model(variant='net', small=False, causal=False, d_in=len(_layout.POOLED_COLUMNS)):
     """a fresh model of a ladder rung: (a) pooled-net, (b) net-notcn (DeepSets only), (c) net,
     (d) net-pair (the pair-conditioned encoder); `small` takes the pre-declared small configuration.
-    net-attn, exploratory (AttentionNet), takes ATTENTION or ATTENTION_SMALL."""
+    net-attn, exploratory (AttentionNet), takes ATTENTION or ATTENTION_SMALL; a -c variant
+    (CONTENT_VARIANTS) is its base model with the group token widened by the content block."""
     if variant not in VARIANTS + EXPLORATORY:
         raise ValueError(f"unknown network variant {variant!r}: one of {', '.join(VARIANTS + EXPLORATORY)}")
-    if variant == 'net-attn':
-        return AttentionNet(causal=causal, **(ATTENTION_SMALL if small else ATTENTION))
-    if variant == 'net-pair-c':
-        return InteractionNet(dilations=(1, 2), causal=causal, pair_conditioned=True, d_g=D_G + D_C,
-                              **(SMALL if small else {}))
-    if variant == 'pooled-net':
+    base, d_g = (CONTENT_VARIANTS[variant], D_G + D_C) if variant in CONTENT_VARIANTS else (variant, D_G)
+    if base == 'net-attn':
+        return AttentionNet(causal=causal, d_g=d_g, **(ATTENTION_SMALL if small else ATTENTION))
+    if base == 'pooled-net':
         return PooledNet(d_in=d_in, causal=causal, **({'d_window': SMALL['d_window']} if small else {}))
-    return InteractionNet(dilations=() if variant == 'net-notcn' else (1, 2), causal=causal,
-                          pair_conditioned=variant == 'net-pair', **(SMALL if small else {}))
+    return InteractionNet(dilations=() if base == 'net-notcn' else (1, 2), causal=causal,
+                          pair_conditioned=base == 'net-pair', d_g=d_g, **(SMALL if small else {}))
 
 
 def use_small(n_coded, small='auto'):
