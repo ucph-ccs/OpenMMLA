@@ -18,7 +18,9 @@ None, NaN) none. `session_tensors` turns a session into the dict every other fun
 pooled control (PooledNet) reads the 123-column pooled view instead of the tokens (the only rung
 that sees the transcript content, which no token holds). net-attn
 (AttentionNet, an exploratory candidate of the architecture panel) reads the same tokens
-through self-attention over the persons and trains through the same functions.
+through self-attention over the persons and trains through the same functions; net-pair-c
+(exploratory too) is net-pair with the transcript content C (T, 5: four scores and m_content)
+appended to the group token (session_tensors' `content`), the one token rung that sees it.
 
 The training part follows the recipe fixed before any result: tempered class weights,
 cross-entropy with label smoothing on coded windows only (uncoded and unclear windows are context),
@@ -48,6 +50,7 @@ from openmmla.analytics.interaction import layout as _layout
 
 # the token widths come from the layout, so the two cannot drift apart (11, 28, 22 in layout version 4)
 D_G, D_P, D_Q = len(_layout.G_COLUMNS), len(_layout.P_COLUMNS), len(_layout.Q_COLUMNS)
+D_C = len(_layout.C_COLUMNS)  # the content block net-pair-c appends to the group token
 N_AVAIL, N_CLASSES = 3, 3
 
 
@@ -240,7 +243,7 @@ SMALL = {'d_set': 16, 'd_speech': 12, 'd_window': 32}
 SMALL_BELOW = 3000
 VARIANTS = ('pooled-net', 'net-notcn', 'net', 'net-pair')  # ladder rungs a-d; rung e (pretraining) is deferred
 # the exploratory candidates of the architecture panel: no rung of the ladder
-EXPLORATORY = ('net-attn',)
+EXPLORATORY = ('net-attn', 'net-pair-c')
 # net-attn's two configurations, taken by the rungs' rule (use_small)
 ATTENTION = {'d_person': 24, 'heads': 2, 'd_speech': 16, 'd_window': 48}
 ATTENTION_SMALL = {'d_person': 16, 'heads': 2, 'd_speech': 12, 'd_window': 32}
@@ -249,8 +252,10 @@ ATTENTION_SMALL = {'d_person': 16, 'heads': 2, 'd_speech': 12, 'd_window': 32}
 # layout tables, then the masks), so the two cannot drift apart: the noise and modality dropout
 # find their columns by these names
 G_COLUMNS, P_COLUMNS, Q_COLUMNS = _layout.G_COLUMNS, _layout.P_COLUMNS, _layout.Q_COLUMNS
+# net-pair-c's group token: the group columns, then the content block's
+GC_COLUMNS = G_COLUMNS + _layout.C_COLUMNS
 # the mask that says a value was observed, and the modality of each mask
-MASK_OF = {v.name: v.mask for v in _layout.GROUP_VALUES + _layout.PERSON_VALUES + _layout.PAIR_VALUES}
+MASK_OF = {v.name: v.mask for v in _layout.GROUP_VALUES + _layout.PERSON_VALUES + _layout.PAIR_VALUES + _layout.CONTENT_VALUES}
 MODALITY_OF_MASK = dict(_layout.MASK_MODALITY)
 # the pooled view's columns that are masks, flags or shares rather than scaled values: no noise on them
 POOLED_FLAGS = ('group_size', 'ips_ran', 'vfa_ran')
@@ -273,12 +278,22 @@ def token_layout(columns):
     by_modality = {modality: [] for modality in MODALITIES}
     for name in columns:
         mask = MASK_OF.get(name, name)
-        if mask in MODALITY_OF_MASK:
+        # the content block belongs to no modality (no availability bit): never dropped, only noised
+        if MODALITY_OF_MASK.get(mask) in by_modality:
             by_modality[MODALITY_OF_MASK[mask]].append(index[name])
     return {'values': values, 'masks': masks, 'modality': by_modality}
 
 
 LAYOUT = {'g': token_layout(G_COLUMNS), 'persons': token_layout(P_COLUMNS), 'pairs': token_layout(Q_COLUMNS)}
+# the layout of a batch whose group token carries the content block (net-pair-c)
+LAYOUT_C = dict(LAYOUT, g=token_layout(GC_COLUMNS))
+
+
+def layout_of(batch, layout=None):
+    """the token layout a batch was built with: the given one, else by the group token's width"""
+    if layout is not None:
+        return layout
+    return LAYOUT_C if 'g' in batch and batch['g'].shape[-1] == D_G + D_C else LAYOUT
 
 
 def make_model(variant='net', small=False, causal=False, d_in=len(_layout.POOLED_COLUMNS)):
@@ -289,6 +304,9 @@ def make_model(variant='net', small=False, causal=False, d_in=len(_layout.POOLED
         raise ValueError(f"unknown network variant {variant!r}: one of {', '.join(VARIANTS + EXPLORATORY)}")
     if variant == 'net-attn':
         return AttentionNet(causal=causal, **(ATTENTION_SMALL if small else ATTENTION))
+    if variant == 'net-pair-c':
+        return InteractionNet(dilations=(1, 2), causal=causal, pair_conditioned=True, d_g=D_G + D_C,
+                              **(SMALL if small else {}))
     if variant == 'pooled-net':
         return PooledNet(d_in=d_in, causal=causal, **({'d_window': SMALL['d_window']} if small else {}))
     return InteractionNet(dilations=() if variant == 'net-notcn' else (1, 2), causal=causal,
@@ -375,18 +393,24 @@ def _position(names, column):
     return names.index(str(column))
 
 
-def session_tensors(tokens, y=None, pooled=None, blocks=None, session=None):
+def session_tensors(tokens, y=None, pooled=None, blocks=None, session=None, content=False):
     """one session as tensors named after the model's arguments (g, avail, persons, person_exists,
     pairs, pair_exists, pair_index) plus y, the class index per window with -1 for no label.
     `tokens` is layout's Tokens (or a dict with its field names); with `pooled` (the 123-column
     view, a DataFrame or array, NaN where no slot qualified) the dict also holds the PooledNet
     input, NaN as 0, and `blocks` (modality -> its pooled columns, names or positions, as
-    layout.block_columns gives them) tells modality dropout where each modality sits in it."""
+    layout.block_columns gives them) tells modality dropout where each modality sits in it. With
+    `content` (net-pair-c) the group token g is G followed by the content block C (tokens.C; absent
+    or None: unobserved, all 0)."""
     out = {'session': session}
     length = None
     if tokens is not None:
         for key, field in TOKEN_FIELDS.items():
             out[key] = _float(_field(tokens, field))
+        if content:
+            C = tokens.get('C') if isinstance(tokens, dict) else getattr(tokens, 'C', None)
+            C = np.full((out['g'].shape[0], D_C), np.nan, dtype=np.float32) if C is None else np.asarray(C)
+            out['g'] = torch.cat([out['g'], _float(C)], -1)
         out['pair_index'] = torch.as_tensor(np.asarray(_field(tokens, 'pair_index'), dtype=np.int64))
         length = out['g'].shape[0]
     if pooled is not None:
@@ -483,7 +507,7 @@ def modality_dropout(batch, p=0.15, run=(6, 24), rng=None, layout=None):
     the modality's pooled block is zeroed instead. The transcript content's block (layout version 5)
     is no modality here: it has no availability bit and is never dropped."""
     rng = rng if rng is not None else np.random.default_rng()
-    layout = layout or LAYOUT
+    layout = layout_of(batch, layout)
     out = _clone(batch)
     n, length = out['y'].shape
     blocks = out.get('pooled_blocks') or {}
@@ -524,7 +548,7 @@ def person_dropout(batch, p=0.1, rng=None):
 def add_noise(batch, sigma=NOISE, rng=None, layout=None):
     """Gaussian noise on the observed scaled values only: a masked value stays 0, a mask stays 0 or 1."""
     rng = rng if rng is not None else np.random.default_rng()
-    layout = layout or LAYOUT
+    layout = layout_of(batch, layout)
     out = _clone(batch)
     for key in ('g', 'persons', 'pairs'):
         if key in out:
