@@ -80,33 +80,33 @@ nav:
       - System prerequisites: prerequisites.md
       - System services: system_services.md
       - Management console (TUI):
-          - Overview: tui/index.md
+          - tui/index.md
           - Environment tab: tui/environment.md
           - Launcher tab:
-              - Overview: tui/launcher/index.md
+              - tui/launcher/index.md
               - System Settings: tui/launcher/system-settings.md
               - System Services: tui/launcher/system-services.md
               - Collection:
-                  - Overview: tui/launcher/collection/index.md
+                  - tui/launcher/collection/index.md
                   - Bringing recordings in: tui/launcher/collection/session-tools.md
               - Pipelines:
-                  - Overview: tui/launcher/pipelines/index.md
+                  - tui/launcher/pipelines/index.md
                   - Streams tab: tui/launcher/pipelines/streams.md
           - Sessions tab: tui/sessions.md
           - Status tab: tui/status.md
   - Pipelines:
       - Automatic speech recognition (ASR):
-          - Overview: pipelines/asr/index.md
+          - pipelines/asr/index.md
           - Run: pipelines/asr/run.md
           - Speakers and diarization: pipelines/asr/speakers-and-diarization.md
           - Configuration: pipelines/asr/configuration.md
       - Indoor positioning (IPS):
-          - Overview: pipelines/ips/index.md
+          - pipelines/ips/index.md
           - Run: pipelines/ips/run.md
           - Calibrate the cameras: pipelines/ips/calibration.md
           - Configuration: pipelines/ips/configuration.md
       - Video frame analyzer (VFA):
-          - Overview: pipelines/vfa/index.md
+          - pipelines/vfa/index.md
           - Run: pipelines/vfa/run.md
           - Action labels: pipelines/vfa/action-labels.md
           - Pose and gaze: pipelines/vfa/pose-and-gaze.md
@@ -117,13 +117,13 @@ nav:
   - Deployment:
       - Docker: docker.md
       - Dashboard:
-          - Overview: dashboard/index.md
+          - dashboard/index.md
           - Live video and sound: dashboard/live-video-and-sound.md
           - Deploy: dashboard/deploy.md
           - Reference: dashboard/reference.md
       - Nginx: nginx.md
       - Streaming (MediaMTX):
-          - Overview: streaming/index.md
+          - streaming/index.md
           - Recording: streaming/recording.md
           - Troubleshooting: streaming/troubleshooting.md
       - Raspberry Pi: raspi_config.md
